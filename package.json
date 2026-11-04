@@ -1,0 +1,35 @@
+{
+  "name": "trading-terminal",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently --kill-others \"turbo -F web dev\" \"bash scripts/native/task-1.sh\"",
+    "build": "turbo build",
+    "check-types": "turbo check-types",
+    "dev:web": "turbo -F web dev",
+    "dev:server": "bash scripts/native/task-1.sh",
+    "check:server": "bash scripts/native/task-2.sh",
+    "test:server": "bash scripts/native/task-3.sh",
+    "setup:part:backend:rust:axum": "bash scripts/native/task-4.sh",
+    "dev:part:backend:rust:axum": "bash scripts/native/task-1.sh",
+    "check:part:backend:rust:axum": "bash scripts/native/task-2.sh",
+    "test:part:backend:rust:axum": "bash scripts/native/task-3.sh",
+    "test": "pnpm --filter web test"
+  },
+  "dependencies": {
+    "@trading-terminal/env": "workspace:*",
+    "dotenv": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@trading-terminal/config": "workspace:*",
+    "concurrently": "^9.2.1",
+    "turbo": "2.10.11",
+    "typescript": "catalog:"
+  },
+  "packageManager": "pnpm@9.12.1"
+}
