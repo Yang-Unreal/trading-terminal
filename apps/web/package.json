@@ -31,6 +31,7 @@
     "zod": "catalog:"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.4",
     "@tanstack/react-router-devtools": "1.167.0",
     "@tanstack/router-cli": "1.167.40",
     "@tanstack/router-plugin": "1.168.42",
@@ -46,6 +47,7 @@
     "@vitest/coverage-v8": "4.1.8",
     "@vitest/ui": "4.1.8",
     "jsdom": "^29.1.1",
+    "tailwindcss": "^4.3.4",
     "typescript": "catalog:",
     "vite": "^8.3.2",
     "vitest": "4.1.8"
