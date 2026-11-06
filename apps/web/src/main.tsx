@@ -23,7 +23,13 @@ if (!rootElement) {
   throw new Error("Root element not found");
 }
 
+import { AuthProvider } from "./lib/auth";
+
 if (!rootElement.innerHTML) {
   const root = ReactDOM.createRoot(rootElement);
-  root.render(<RouterProvider router={router} />);
+  root.render(
+    <AuthProvider>
+      <RouterProvider router={router} />
+    </AuthProvider>,
+  );
 }

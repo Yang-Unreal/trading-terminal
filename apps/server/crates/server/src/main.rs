@@ -1,133 +1,217 @@
-mod database;
-use axum::{extract::Path, routing::{delete, get, post, put}, Json, Router};
-use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
 mod auth;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+mod config;
+mod database;
+mod session_store;
 
-#[derive(Serialize, Deserialize, sqlx::FromRow, Clone)]
-struct Item {
-    id: i64,
-    name: String,
-}
+use axum::{routing::get, Json, Router};
+use serde::Serialize;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use tower_http::cors::CorsLayer;
 
-#[derive(Deserialize)]
-struct ItemInput {
-    name: String,
-}
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
+    pub config: config::Config,
 }
 
-async fn health(
-    axum::extract::State(state): axum::extract::State<AppState>,
-) -> Json<serde_json::Value> {
-    let db_status = if state.db.acquire().await.is_ok() {
-        "connected"
-    } else {
-        "disconnected"
-    };
-    Json(serde_json::json!({"status":"ok","database":db_status}))
+#[derive(Serialize)]
+struct LiveResponse {
+    status: &'static str,
 }
 
-async fn list_items(
+#[derive(Serialize)]
+struct ReadyResponse {
+    status: &'static str,
+    schema_version: i64,
+}
+
+async fn live() -> Json<LiveResponse> {
+    Json(LiveResponse { status: "ok" })
+}
+
+async fn ready(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> Result<Json<Vec<Item>>, (axum::http::StatusCode, String)> {
-    let items = sqlx::query_as::<_, Item>("SELECT id, name FROM items ORDER BY id")
-        .fetch_all(&state.db)
+) -> Result<Json<ReadyResponse>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // DB connectivity
+    if state.db.acquire().await.is_err() {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status":"not_ready","reason":"database_unavailable"})),
+        ));
+    }
+    // migration version
+    let applied: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(&state.db)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(items))
+        .unwrap_or(None);
+    let latest = MIGRATOR.migrations.last().map(|m| m.version).unwrap_or(0);
+    let ver = applied.unwrap_or(0);
+    if ver < latest {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::json!({"status":"not_ready","reason":"migrations_incomplete","schema_version":ver}),
+            ),
+        ));
+    }
+    Ok(Json(ReadyResponse {
+        status: "ok",
+        schema_version: ver,
+    }))
 }
 
-async fn create_item(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    Json(input): Json<ItemInput>,
-) -> Result<Json<Item>, (axum::http::StatusCode, String)> {
-    let item = sqlx::query_as::<_, Item>(
-        "INSERT INTO items (name) VALUES ($1) RETURNING id, name",
-    )
-    .bind(input.name)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(item))
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn db_connectivity_and_migrations() {
+        dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env")).ok();
+        let cfg = config::Config::from_env().expect("config");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&cfg.database_url)
+            .await
+            .expect("connect");
+        // SELECT 1
+        let one: i32 = sqlx::query_scalar("SELECT 1").fetch_one(&pool).await.expect("select1");
+        assert_eq!(one, 1);
+        MIGRATOR.run(&pool).await.expect("migrate");
+        let applied: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .expect("version");
+        let latest = MIGRATOR.migrations.last().map(|m| m.version).unwrap_or(0);
+        assert_eq!(applied.unwrap_or(0), latest);
+    }
 }
 
-async fn update_item(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    Path(id): Path<i64>,
-    Json(input): Json<ItemInput>,
-) -> Result<Json<Option<Item>>, (axum::http::StatusCode, String)> {
-    let item = sqlx::query_as::<_, Item>(
-        "UPDATE items SET name = $1 WHERE id = $2 RETURNING id, name",
-    )
-    .bind(input.name)
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(item))
-}
-
-async fn delete_item(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    Path(id): Path<i64>,
-) -> Result<Json<bool>, (axum::http::StatusCode, String)> {
-    let res = sqlx::query("DELETE FROM items WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(res.rows_affected() > 0))
-}
-
-fn cors_layer() -> CorsLayer {
-    match std::env::var("CORS_ORIGIN") {
-        Ok(origin) if !origin.is_empty() => CorsLayer::new()
-            .allow_origin(origin.parse::<axum::http::HeaderValue>().expect("invalid CORS_ORIGIN"))
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any),
-        _ => CorsLayer::permissive(),
+fn cors_layer(cfg: &config::Config) -> CorsLayer {
+    match &cfg.cors_origin {
+        Some(origin) => CorsLayer::new()
+            .allow_origin(
+                origin
+                    .parse::<axum::http::HeaderValue>()
+                    .expect("invalid CORS_ORIGIN"),
+            )
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::HeaderName::from_static("content-type"),
+                axum::http::HeaderName::from_static("x-csrf-token"),
+            ])
+            .allow_credentials(true),
+        None => CorsLayer::permissive(),
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // CLI: create-admin
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "delete-admin" {
+        dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env")).ok();
+        let cfg = config::Config::from_env()?;
+        let pool = PgPoolOptions::new().max_connections(2).connect(&cfg.database_url).await?;
+        let _ = sqlx::query("DELETE FROM tower_sessions.session").execute(&pool).await;
+        sqlx::query("DELETE FROM users").execute(&pool).await?;
+        println!("All administrators deleted.");
+        return Ok(());
+    }
+
+    if args.len() >= 2 && args[1] == "create-admin" {
+        dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env")).ok();
+        let cfg = config::Config::from_env()?;
+        let pool = PgPoolOptions::new().max_connections(2).connect(&cfg.database_url).await?;
+        // check existing
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(&pool).await?;
+        if count > 0 {
+            eprintln!("Administrator already exists. Aborting.");
+            return Ok(());
+        }
+        use std::io::{self, Write};
+        print!("Username: ");
+        io::stdout().flush().unwrap();
+        let mut username = String::new();
+        io::stdin().read_line(&mut username)?;
+        let username = username.trim().to_string();
+        let password = rpassword::prompt_password("Password: ").unwrap();
+        let confirm = rpassword::prompt_password("Confirm password: ").unwrap();
+        if password != confirm {
+            eprintln!("Passwords do not match.");
+            return Ok(());
+        }
+        let hash = auth::hash_password(&password).await.map_err(|_| "hash failed")?;
+        sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, $2)")
+            .bind(&username)
+            .bind(&hash)
+            .execute(&pool)
+            .await?;
+        println!("Administrator created.");
+        return Ok(());
+    }
+
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+
+    let cfg = config::Config::from_env().map_err(|e| {
+        eprintln!("Configuration error: {}", e);
+        std::io::Error::other(e)
+    })?;
+
     println!("Connecting to database...");
     let pool = PgPoolOptions::new()
         .max_connections(5)
-        .connect(&database_url)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(&cfg.database_url)
         .await?;
     println!("Database connected successfully");
 
-    sqlx::query("CREATE TABLE IF NOT EXISTS items (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL)")
-        .execute(&pool)
-        .await?;
+    MIGRATOR.run(&pool).await?;
+    println!("Migrations applied");
 
-    let state = AppState { db: pool };
+    let state = AppState {
+        db: pool.clone(),
+        config: cfg.clone(),
+    };
 
     let app = Router::new()
-        .route("/health", get(health))
-        .route("/items", get(list_items).post(create_item))
-        .route("/items/{id}", put(update_item).delete(delete_item))
-        .layer(cors_layer())
+        .route("/health/live", get(live))
+        .route("/health/ready", get(ready))
+        .route("/auth/login", axum::routing::post(auth::login))
+        .route("/auth/logout", axum::routing::post(auth::logout))
+        .route("/auth/me", get(auth::me))
+        .route("/auth/csrf", get(auth::get_csrf))
+        .layer(cors_layer(&cfg))
         .with_state(state);
 
-    let app = app.layer(auth::session_layer());
+    let store = crate::session_store::PostgresStore::new(pool.clone());
+    let app = app.layer(auth::session_layer(store, cfg.is_production()).await);
 
-    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
-    let addr = format!("{}:{}", host, port);
-
+    let addr = cfg.addr();
     println!("Starting HTTP server at http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod dbg {
+    use super::*;
+    #[tokio::test]
+    async fn show() {
+        dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env")).ok();
+        let cfg = config::Config::from_env().unwrap();
+        let pool = PgPoolOptions::new().max_connections(1).connect(&cfg.database_url).await.unwrap();
+        let rows: Vec<(uuid::Uuid,String,String)> = sqlx::query_as("SELECT id, username, password_hash FROM users").fetch_all(&pool).await.unwrap();
+        for r in rows { println!("USER: {:?} hashlen={}", r.1, r.2.len()); }
+    }
 }

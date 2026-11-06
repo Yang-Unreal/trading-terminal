@@ -31,6 +31,15 @@ sqlx.workspace = true
 
 tower-sessions.workspace = true
 
+# Auth
+argon2 = "0.5"
+rpassword = "7"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = "0.3"
+rmp-serde = "1"
+async-trait = "0.1"
+thiserror = "1"
+
 [[bin]]
 name = "server"
 path = "src/main.rs"
