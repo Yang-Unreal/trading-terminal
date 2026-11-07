@@ -6,39 +6,38 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-# Async runtime
 tokio.workspace = true
-
-# Serialization
 serde.workspace = true
 serde_json.workspace = true
-
-
-
-# Environment
 dotenvy.workspace = true
-
-
-# Web framework
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
-
-# Database
 sqlx.workspace = true
-
-
-
 tower-sessions.workspace = true
-
-# Auth
 argon2 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+zeroize = { version = "1", features = ["derive"] }
 rpassword = "7"
 uuid = { version = "1", features = ["v4", "serde"] }
 time = "0.3"
 rmp-serde = "1"
 async-trait = "0.1"
 thiserror = "1"
+
+reqwest = { version = "0.12", features = ["json"] }
+
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+futures-util = "0.3"
+rust_decimal = { version = "1.43", features = ["serde-with-str"] }
+rustls = { version = "0.23", features = ["ring"] }
+tokio-socks = "0.5"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
 
 [[bin]]
 name = "server"

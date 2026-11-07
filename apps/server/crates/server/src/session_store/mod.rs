@@ -15,9 +15,15 @@ pub enum SqlxStoreError {
 impl From<SqlxStoreError> for tower_sessions::session_store::Error {
     fn from(err: SqlxStoreError) -> Self {
         match err {
-            SqlxStoreError::Sqlx(inner) => tower_sessions::session_store::Error::Backend(inner.to_string()),
-            SqlxStoreError::Decode(inner) => tower_sessions::session_store::Error::Decode(inner.to_string()),
-            SqlxStoreError::Encode(inner) => tower_sessions::session_store::Error::Encode(inner.to_string()),
+            SqlxStoreError::Sqlx(inner) => {
+                tower_sessions::session_store::Error::Backend(inner.to_string())
+            }
+            SqlxStoreError::Decode(inner) => {
+                tower_sessions::session_store::Error::Decode(inner.to_string())
+            }
+            SqlxStoreError::Encode(inner) => {
+                tower_sessions::session_store::Error::Encode(inner.to_string())
+            }
         }
     }
 }

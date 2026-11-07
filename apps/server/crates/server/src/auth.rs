@@ -1,14 +1,21 @@
-use std::sync::Mutex;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use argon2::{password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
-use axum::{extract::State, http::{HeaderMap, StatusCode}, Json};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 
-use crate::AppState;
 use crate::session_store::PostgresStore;
+use crate::AppState;
 
 pub const SESSION_USER_KEY: &str = "user_id";
 pub const SESSION_CSRF_KEY: &str = "csrf_token";
@@ -78,7 +85,11 @@ pub async fn hash_password(password: &str) -> Result<String, StatusCode> {
 
 pub async fn verify_password(hash: &str, password: &str) -> bool {
     PasswordHash::new(hash)
-        .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+        .map(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
@@ -91,22 +102,31 @@ async fn get_or_create_csrf(session: &Session) -> Result<String, StatusCode> {
         return Ok(tok);
     }
     let tok = generate_csrf_token();
-    session.insert(SESSION_CSRF_KEY, tok.clone()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    session
+        .insert(SESSION_CSRF_KEY, tok.clone())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(tok)
 }
 
-fn extract_csrf_header(headers: &HeaderMap) -> Option<String> {
-    headers.get("x-csrf-token").and_then(|v| v.to_str().ok()).map(|s| s.to_string())
+pub fn extract_csrf_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-csrf-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
-fn origin_allowed(headers: &HeaderMap, cfg_origin: Option<&str>) -> bool {
+pub fn origin_allowed(headers: &HeaderMap, cfg_origin: Option<&str>) -> bool {
     match headers.get("origin").and_then(|v| v.to_str().ok()) {
         None => true,
         Some(o) => cfg_origin.map(|c| o == c).unwrap_or(true),
@@ -144,17 +164,19 @@ pub async fn login(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let row: Option<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT id, password_hash FROM users WHERE username = $1",
-    )
-    .bind(&input.username)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let row: Option<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT id, password_hash FROM users WHERE username = $1")
+            .bind(&input.username)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let (id, hash) = match row {
         Some(u) => u,
-        None => { rate_limit_fail(&key); return Err(StatusCode::UNAUTHORIZED); }
+        None => {
+            rate_limit_fail(&key);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
     };
 
     if !verify_password(&hash, &input.password).await {
@@ -165,16 +187,21 @@ pub async fn login(
     let _ = session.cycle_id().await;
     // new csrf token
     let new_tok = generate_csrf_token();
-    session.insert(SESSION_CSRF_KEY, new_tok).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    session.insert(SESSION_USER_KEY, id.to_string()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    session
+        .insert(SESSION_CSRF_KEY, new_tok)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    session
+        .insert(SESSION_USER_KEY, id.to_string())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     rate_limit_reset(&key);
-    Ok(Json(AuthResponse { authenticated: true }))
+    Ok(Json(AuthResponse {
+        authenticated: true,
+    }))
 }
 
-pub async fn logout(
-    session: Session,
-    headers: HeaderMap,
-) -> StatusCode {
+pub async fn logout(session: Session, headers: HeaderMap) -> StatusCode {
     let expected = session.get::<String>(SESSION_CSRF_KEY).await.ok().flatten();
     let provided = extract_csrf_header(&headers);
     match (expected, provided) {
@@ -189,7 +216,10 @@ pub async fn me(
     State(state): State<AppState>,
     session: Session,
 ) -> Result<Json<UserInfo>, StatusCode> {
-    let user_id: Option<String> = session.get(SESSION_USER_KEY).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let user_id: Option<String> = session
+        .get(SESSION_USER_KEY)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let id = user_id.ok_or(StatusCode::UNAUTHORIZED)?;
     let uid = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::UNAUTHORIZED)?;
     let info = sqlx::query_as::<_, UserInfo>("SELECT id, username FROM users WHERE id = $1")
@@ -198,6 +228,14 @@ pub async fn me(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     info.ok_or(StatusCode::UNAUTHORIZED).map(Json)
+}
+
+#[allow(dead_code)]
+pub async fn require_auth(session: Session) -> StatusCode {
+    match session.get::<String>(SESSION_USER_KEY).await {
+        Ok(Some(_)) => StatusCode::OK,
+        _ => StatusCode::UNAUTHORIZED,
+    }
 }
 
 pub async fn session_layer(
@@ -210,5 +248,49 @@ pub async fn session_layer(
         layer.with_secure(true).with_http_only(true)
     } else {
         layer.with_secure(false).with_http_only(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn password_hash_and_verify() {
+        let hash = hash_password("secret123").await.unwrap();
+        assert!(verify_password(&hash, "secret123").await);
+        assert!(!verify_password(&hash, "wrong").await);
+    }
+
+    #[test]
+    fn constant_time_eq_works() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "abcd"));
+    }
+
+    #[test]
+    fn origin_allowed_logic() {
+        let mut h = HeaderMap::new();
+        assert!(origin_allowed(&h, Some("http://localhost:5173")));
+        h.insert("origin", "http://localhost:5173".parse().unwrap());
+        assert!(origin_allowed(&h, Some("http://localhost:5173")));
+        h.insert("origin", "http://evil.example".parse().unwrap());
+        assert!(!origin_allowed(&h, Some("http://localhost:5173")));
+        let mut h2 = HeaderMap::new();
+        h2.insert("origin", "http://evil.example".parse().unwrap());
+        assert!(origin_allowed(&h2, None));
+    }
+
+    #[test]
+    fn rate_limit_blocks_after_five() {
+        let key = "test-user:127.0.0.1:extra";
+        rate_limit_reset(key);
+        for _ in 0..5 {
+            assert!(rate_limit_check(key).is_ok());
+            rate_limit_fail(key);
+        }
+        assert!(rate_limit_check(key).is_err());
+        rate_limit_reset(key);
     }
 }
