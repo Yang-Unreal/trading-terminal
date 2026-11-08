@@ -28,6 +28,13 @@ function HomeComponent() {
         <button
           type="button"
           className="rounded-md border px-3 py-1 text-sm"
+          onClick={() => navigate({ to: "/markets/$symbol", params: { symbol: "BTCUSDT" } })}
+        >
+          Open BTCUSDT Market
+        </button>
+        <button
+          type="button"
+          className="rounded-md border px-3 py-1 text-sm"
           onClick={async () => {
             await logout();
             navigate({ to: "/login" });

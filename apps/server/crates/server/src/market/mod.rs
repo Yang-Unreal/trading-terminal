@@ -9,5 +9,5 @@ pub mod ws;
 
 pub use bitget::rest::BitgetRestClient;
 pub use errors::MarketError;
-pub use models::{Instrument, OrderBook, Ticker};
+pub use models::{Candle, Instrument, OrderBook, Ticker, Trade};
 pub use service::MarketService;

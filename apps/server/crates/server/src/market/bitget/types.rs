@@ -51,3 +51,17 @@ pub struct BitgetOrderBook {
     pub bids: Option<Vec<BitgetDepthEntry>>,
     pub ts: Option<String>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct BitgetFill {
+    #[serde(rename = "tradeId")]
+    pub trade_id: Option<String>,
+    #[serde(rename = "price")]
+    pub price: Option<String>,
+    #[serde(rename = "size")]
+    pub size: Option<String>,
+    #[serde(rename = "side")]
+    pub side: Option<String>,
+    #[serde(rename = "ts")]
+    pub ts: Option<String>,
+}

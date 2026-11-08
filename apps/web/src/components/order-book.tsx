@@ -9,8 +9,8 @@ interface OrderBookProps {
 }
 
 export function OrderBook({ orderBook, stale }: OrderBookProps) {
-  const asksHighToLow = useMemo(() => [...(orderBook?.asks ?? [])].sort((a, b) => Number(b.price) - Number(a.price)), []);
-  const bidsHighToLow = useMemo(() => [...(orderBook?.bids ?? [])].sort((a, b) => Number(b.price) - Number(a.price)), []);
+  const asksHighToLow = useMemo(() => [...(orderBook?.asks ?? [])].sort((a, b) => Number(b.price) - Number(a.price)), [orderBook]);
+  const bidsHighToLow = useMemo(() => [...(orderBook?.bids ?? [])].sort((a, b) => Number(b.price) - Number(a.price)), [orderBook]);
 
   const askCumulative = useMemo(() => {
     const ascending = [...(orderBook?.asks ?? [])].sort((a, b) => Number(a.price) - Number(b.price));

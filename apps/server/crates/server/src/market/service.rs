@@ -1,4 +1,4 @@
-use crate::market::{BitgetRestClient, Instrument, MarketError, OrderBook, Ticker};
+use crate::market::{BitgetRestClient, Candle, Instrument, MarketError, OrderBook, Ticker, Trade};
 
 #[derive(Clone)]
 pub struct MarketService {
@@ -22,5 +22,34 @@ impl MarketService {
 
     pub async fn get_order_book(&self, symbol: &str) -> Result<OrderBook, MarketError> {
         self.client.get_order_book(symbol).await
+    }
+
+    pub async fn get_recent_trades(&self, symbol: &str) -> Result<Vec<Trade>, MarketError> {
+        self.client.get_recent_trades(symbol).await
+    }
+
+    pub async fn get_candles(
+        &self,
+        symbol: &str,
+        granularity: &str,
+        limit: Option<usize>,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<Candle>, MarketError> {
+        self.client
+            .get_candles(symbol, granularity, limit, start_time, end_time)
+            .await
+    }
+
+    pub async fn get_history_candles(
+        &self,
+        symbol: &str,
+        granularity: &str,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<Candle>, MarketError> {
+        self.client
+            .get_history_candles(symbol, granularity, start_time, end_time)
+            .await
     }
 }

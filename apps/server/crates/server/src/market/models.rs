@@ -34,6 +34,24 @@ pub struct Ticker {
     pub ts_received: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trade {
+    pub trade_id: String,
+    pub symbol: String,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub side: TradeSide,
+    pub ts_exchange: Option<i64>,
+    pub ts_received: i64,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBookLevel {
     pub price: Decimal,
@@ -48,5 +66,21 @@ pub struct OrderBook {
     pub ts_exchange: Option<i64>,
     pub ts_received: i64,
     pub seq: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Candle {
+    pub symbol: String,
+    pub granularity: String,
+    pub start_time: i64,
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub base_volume: Decimal,
+    pub quote_volume: Decimal,
+    pub usdt_volume: Option<Decimal>,
+    pub ts_received: i64,
     pub source: String,
 }

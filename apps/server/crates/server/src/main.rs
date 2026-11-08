@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod database;
 mod market;
+mod preferences;
 mod session_store;
 mod vault;
 
@@ -132,6 +133,10 @@ mod integration_tests {
             .route(
                 "/api/credentials",
                 get(vault::api::list).post(vault::api::create),
+            )
+            .route(
+                "/api/preferences",
+                get(preferences::get_preferences).patch(preferences::patch_preferences),
             )
             .layer(cors_layer(&cfg))
             .with_state(state);
@@ -356,7 +361,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/market/orderbook/{symbol}",
             get(market::api::orderbook),
         )
+        .route("/api/market/trades/{symbol}", get(market::api::trades))
+        .route("/api/market/candles/{symbol}", get(market::api::candles))
+        .route(
+            "/api/market/history-candles/{symbol}",
+            get(market::api::history_candles),
+        )
         .route("/ws/market", get(market::ws::ws_market))
+        .route(
+            "/api/preferences",
+            get(preferences::get_preferences).patch(preferences::patch_preferences),
+        )
         .layer(cors_layer(&cfg))
         .with_state(state);
 
