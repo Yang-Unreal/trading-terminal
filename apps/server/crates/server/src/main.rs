@@ -80,6 +80,18 @@ mod integration_tests {
         std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL")
     }
 
+    /// Acquire a session-level advisory lock to prevent concurrent test runs
+    /// from corrupting each other's state on a shared test database.
+    async fn acquire_test_lock(pool: &PgPool) {
+        let key: (i64, i64) = (9_100_000_000i64, 9_100_000_001i64); // arbitrary but fixed lock key
+        sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            .bind(key.0)
+            .bind(key.1)
+            .execute(pool)
+            .await
+            .expect("failed to acquire test advisory lock");
+    }
+
     async fn setup_pool() -> PgPool {
         dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env")).ok();
         let key = [7u8; 32];
@@ -93,6 +105,8 @@ mod integration_tests {
             .connect(&url)
             .await
             .expect("connect");
+        // Prevent concurrent test processes from resetting the same shared test database
+        acquire_test_lock(&pool).await;
         MIGRATOR.run(&pool).await.expect("migrate");
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
             .fetch_one(&pool)
@@ -290,6 +304,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if args.len() >= 2 && args[1] == "db-check" {
+        dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env")).ok();
+        let cfg = config::Config::from_env()?;
+        return run_db_check(&cfg.database_url).await;
+    }
+
     dotenvy::dotenv().ok();
 
     let cfg = config::Config::from_env().map_err(|e| {
@@ -302,10 +322,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(5)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(&cfg.database_url)
-        .await?;
+        .await
+        .map_err(|e| {
+            eprintln!("Database connection failed: {}", e);
+            std::io::Error::other(e.to_string())
+        })?;
     println!("Database connected successfully");
 
-    MIGRATOR.run(&pool).await?;
+    // Print database identity diagnostics (credentials redacted)
+    print_db_identity(&pool).await;
+
+    // Validate migration checksums before applying
+    validate_migration_checksums(&pool).await.map_err(|e| {
+        eprintln!("Migration validation failed: {}", e);
+        std::io::Error::other(e.to_string())
+    })?;
+
+    MIGRATOR.run(&pool).await.map_err(|e| {
+        eprintln!("Migration execution failed: {}", e);
+        std::io::Error::other(e.to_string())
+    })?;
     println!("Migrations applied");
 
     let keyring = vault::Keyring::from_env().map_err(|e| {
@@ -408,6 +444,159 @@ mod dbg {
             println!("USER: {:?} hashlen={}", r.1, r.2.len());
         }
     }
+}
+
+/// Print database identity diagnostics with credentials redacted.
+async fn print_db_identity(pool: &PgPool) {
+    let row: Option<(String, Option<String>, Option<i32>)> = match sqlx::query_as(
+        "SELECT current_database(), inet_server_addr()::text, inet_server_port()",
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Warning: could not query database identity: {}", e);
+            return;
+        }
+    };
+
+    match row {
+        Some((db, host, port)) => {
+            println!("Database: {}", db);
+            if let Some(h) = host {
+                println!("Database host: {}:{}", h, port.unwrap_or(0));
+            } else {
+                println!("Database host: (local connection)");
+            }
+        }
+        None => {
+            eprintln!("Warning: could not determine database identity");
+        }
+    }
+}
+
+/// Validate that recorded migration checksums match the current local migration files.
+/// Does not apply any migrations. Exits non-zero on mismatch.
+async fn validate_migration_checksums(pool: &PgPool) -> Result<(), String> {
+    let applied: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT version, description, encode(checksum, 'hex') FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("failed to query _sqlx_migrations: {e}"))?;
+
+    if applied.is_empty() {
+        println!("No migrations previously applied; checksum validation skipped.");
+        return Ok(());
+    }
+
+    println!("Validating {} applied migration(s)...", applied.len());
+
+    let mut mismatches: Vec<String> = Vec::new();
+    for (version, description, recorded_checksum) in &applied {
+        let local = MIGRATOR.migrations.iter().find(|m| m.version == *version);
+
+        match local {
+            Some(m) => {
+                let local_checksum = m
+                    .checksum
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>();
+                if local_checksum != *recorded_checksum {
+                    mismatches.push(format!(
+                        "Migration version {} ({}): recorded checksum {} does not match local file checksum {}",
+                        version, description, recorded_checksum, local_checksum
+                    ));
+                }
+            }
+            None => {
+                mismatches.push(format!(
+                    "Migration version {} ({}): recorded in database but migration file is missing from local checkout",
+                    version, description
+                ));
+            }
+        }
+    }
+
+    if !mismatches.is_empty() {
+        for m in &mismatches {
+            eprintln!("MISMATCH: {}", m);
+        }
+        eprintln!(
+            "\nMigration checksum validation FAILED.\n\
+             This means an already-applied migration file has been modified, or the database \
+             points to a different migration history.\n\
+             See MIGRATION_POLICY.md for recovery procedures.\n\
+             Diagnostic: SELECT version, description, installed_on, success, encode(checksum, 'hex') \
+             FROM _sqlx_migrations ORDER BY version;"
+        );
+        return Err("migration checksum mismatch".to_string());
+    }
+
+    println!("All migration checksums match.");
+    Ok(())
+}
+
+/// Run `pnpm db:check` — validate migration checksums without applying migrations.
+async fn run_db_check(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(database_url)
+        .await?;
+    print_db_identity(&pool).await;
+
+    let applied: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT version, description, encode(checksum, 'hex') FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await?;
+
+    let pending: Vec<(i64, String)> = MIGRATOR
+        .migrations
+        .iter()
+        .filter(|m| !applied.iter().any(|(v, _, _)| v == &m.version))
+        .map(|m| (m.version, m.description.to_string()))
+        .collect();
+
+    println!("Applied migrations: {}", applied.len());
+    for (version, description, checksum) in &applied {
+        println!(
+            "  v{} {} [checksum {}]",
+            version,
+            description,
+            &checksum[..16]
+        );
+    }
+
+    println!("Pending migrations: {}", pending.len());
+    for (version, description) in &pending {
+        println!("  v{} {}", version, description);
+    }
+
+    // Check for missing migration files
+    let missing: Vec<(i64, String)> = applied
+        .iter()
+        .filter(|(v, _, _)| !MIGRATOR.migrations.iter().any(|m| m.version == *v))
+        .map(|(v, desc, _)| (*v, desc.clone()))
+        .collect();
+
+    if !missing.is_empty() {
+        eprintln!("ERROR: Migration files missing from local checkout:");
+        for (version, description) in &missing {
+            eprintln!("  v{} {}", version, description);
+        }
+        std::process::exit(1);
+    }
+
+    // Validate checksums
+    let check_result = validate_migration_checksums(&pool).await;
+    if let Err(e) = check_result {
+        eprintln!("ERROR: {}", e);
+        std::process::exit(1);
+    }
+
+    println!("db:check: OK");
+    Ok(())
 }
 
 #[cfg(test)]

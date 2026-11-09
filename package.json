@@ -18,6 +18,7 @@
     "dev:part:backend:rust:axum": "bash scripts/native/task-1.sh",
     "check:part:backend:rust:axum": "bash scripts/native/task-2.sh",
     "test:part:backend:rust:axum": "bash scripts/native/task-3.sh",
+    "db:check": "cd apps/server && cargo run --bin server db-check",
     "test": "pnpm --filter web test"
   },
   "dependencies": {
