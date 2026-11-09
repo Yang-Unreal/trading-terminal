@@ -82,11 +82,15 @@ mod integration_tests {
 
     /// Acquire a session-level advisory lock to prevent concurrent test runs
     /// from corrupting each other's state on a shared test database.
+    ///
+    /// Uses the single-argument pg_advisory_lock(bigint) overload because the
+    /// two-key values exceed the PostgreSQL integer range and there is no
+    /// pg_advisory_lock(bigint, bigint) overload. The lock is session-level:
+    /// it is released automatically when the underlying connection drops.
     async fn acquire_test_lock(pool: &PgPool) {
-        let key: (i64, i64) = (9_100_000_000i64, 9_100_000_001i64); // arbitrary but fixed lock key
-        sqlx::query("SELECT pg_advisory_lock($1, $2)")
-            .bind(key.0)
-            .bind(key.1)
+        let key: i64 = 9_100_000_000i64; // arbitrary but fixed lock key
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(key)
             .execute(pool)
             .await
             .expect("failed to acquire test advisory lock");
