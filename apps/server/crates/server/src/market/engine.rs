@@ -4,14 +4,84 @@ use crate::market::bitget::ws::{
 use crate::market::models::{Candle, OrderBook, Ticker, Trade};
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
+use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{broadcast, Notify, RwLock};
 use tokio::time::{interval, Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 
 const TRADE_BUFFER_CAP: usize = 100;
 const CANDLE_BUFFER_CAP: usize = 500;
+
+/// Bitget Classic V2 expects a heartbeat every 30s and responds with `pong`.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// If no valid application-level text Pong is received within this window after
+/// the last successful Pong, the connection is treated as dead and the reconnect
+/// path is triggered.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(35);
+
+/// Initial reconnect backoff cap before the first retry.
+const RECONNECT_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+/// Maximum reconnect backoff cap; the sequence never grows beyond this.
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Exponential reconnect backoff with equal jitter.
+///
+/// For a backoff cap `B`, `next_delay` returns a randomized delay in
+/// `[B/2, B]` and advances the cap for the next unsuccessful attempt
+/// (`cap = min(cap * 2, MAX)`). The cap is reset to `INITIAL` only after a
+/// valid Bitget application-level text `"pong"` confirms the connection is
+/// healthy.
+struct ReconnectBackoff {
+    cap: Duration,
+    rng: rand::rngs::StdRng,
+}
+
+impl ReconnectBackoff {
+    fn new() -> Self {
+        ReconnectBackoff {
+            cap: RECONNECT_BACKOFF_INITIAL,
+            rng: rand::rngs::StdRng::from_entropy(),
+        }
+    }
+
+    /// Produce the next randomized delay and advance the cap. The returned
+    /// delay is in `[cap/2, cap]` (equal jitter). Safe arithmetic prevents
+    /// overflow.
+    fn next_delay(&mut self) -> Duration {
+        let cap_ms = self.cap.as_millis() as u64;
+        let half = cap_ms / 2;
+        // Equal jitter: uniform in [cap/2, cap].
+        let delay_ms = self.rng.gen_range(half..=cap_ms);
+        // Advance the cap for the next failure, capped at the maximum.
+        let next_cap_ms = (cap_ms * 2).min(RECONNECT_BACKOFF_MAX.as_millis() as u64);
+        self.cap = Duration::from_millis(next_cap_ms);
+        Duration::from_millis(delay_ms)
+    }
+
+    /// Reset the cap to the initial value.
+    fn reset(&mut self) {
+        self.cap = RECONNECT_BACKOFF_INITIAL;
+    }
+
+    fn cap(&self) -> Duration {
+        self.cap
+    }
+}
+
+/// Sleep for `delay`, but return `false` promptly if shutdown is signaled.
+/// Returns `true` when the full delay elapsed (continue reconnecting).
+async fn wait_interruptible(delay: Duration, shutdown: &AtomicBool, notify: &Notify) -> bool {
+    if shutdown.load(Ordering::SeqCst) {
+        return false;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => true,
+        _ = notify.notified() => false,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -41,6 +111,11 @@ pub struct MarketDataEngine {
     orderbook_live: Arc<RwLock<HashMap<String, bool>>>,
     trades_live: Arc<RwLock<HashMap<String, bool>>>,
     candles_live: Arc<RwLock<HashMap<String, HashMap<String, bool>>>>,
+    shutdown: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+    reconnect_backoff_cap: Arc<Mutex<Duration>>,
+    heartbeat_timeout: Duration,
+    heartbeat_interval: Duration,
 }
 
 impl MarketDataEngine {
@@ -81,7 +156,43 @@ impl MarketDataEngine {
             orderbook_live: Arc::new(RwLock::new(HashMap::new())),
             trades_live: Arc::new(RwLock::new(HashMap::new())),
             candles_live: Arc::new(RwLock::new(HashMap::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+            reconnect_backoff_cap: Arc::new(Mutex::new(RECONNECT_BACKOFF_INITIAL)),
+            heartbeat_timeout: HEARTBEAT_TIMEOUT,
+            heartbeat_interval: HEARTBEAT_INTERVAL,
         }
+    }
+
+    /// Override the heartbeat timeout. Used by tests to exercise dead-connection
+    /// detection without waiting for the production 35s window.
+    pub fn with_heartbeat_timeout(mut self, timeout: Duration) -> Self {
+        self.heartbeat_timeout = timeout;
+        self
+    }
+
+    /// Override the heartbeat interval. Used by tests to accelerate ping timing.
+    pub fn with_heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
+    }
+
+    /// Request an intentional shutdown of the WebSocket connection loop.
+    ///
+    /// The reconnect wait (and any in-flight connection attempt) observes this
+    /// flag and exits promptly instead of sleeping through the full backoff
+    /// window. Intentional shutdown is not treated as a retryable failure and
+    /// does not advance the backoff.
+    pub fn stop(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+
+    /// Current reconnect backoff cap. Exposed for tests so the lifecycle can
+    /// assert that the cap advances on failure and resets only after a valid
+    /// application-level text `"pong"`.
+    pub fn reconnect_backoff_cap(&self) -> Duration {
+        *self.reconnect_backoff_cap.lock().unwrap()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Ticker> {
@@ -264,20 +375,41 @@ impl MarketDataEngine {
     pub fn start(self: Arc<Self>) {
         let engine = self.clone();
         tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
+            let mut backoff = ReconnectBackoff::new();
+            let mut attempt = 0u64;
             loop {
+                // Intentional shutdown is not a retryable failure; do not
+                // start another connection attempt.
+                if engine.shutdown.load(Ordering::SeqCst) {
+                    *engine.status.write().await = ConnectionStatus::Disconnected;
+                    return;
+                }
+                attempt += 1;
                 *engine.status.write().await = ConnectionStatus::Connecting;
-                let ws = if let Some(proxy) = &self.ws_proxy {
-                    connect_via_socks5(&self.ws_url, proxy).await
+                let ws = if let Some(proxy) = &engine.ws_proxy {
+                    connect_via_socks5(&engine.ws_url, proxy).await
                 } else {
-                    connect_direct(&self.ws_url).await
+                    connect_direct(&engine.ws_url).await
                 };
                 let mut ws = match ws {
                     Ok(v) => v,
-                    Err(_e) => {
+                    Err(e) => {
+                        eprintln!(
+                            "market engine: WebSocket connect failed (attempt {}): {}",
+                            attempt, e
+                        );
                         *engine.status.write().await = ConnectionStatus::Reconnecting;
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        let delay = backoff.next_delay();
+                        *engine.reconnect_backoff_cap.lock().unwrap() = backoff.cap();
+                        eprintln!(
+                            "market engine: reconnecting in {:?} (attempt {}, cap {:?})",
+                            delay,
+                            attempt,
+                            backoff.cap()
+                        );
+                        if !wait_interruptible(delay, &engine.shutdown, &engine.notify).await {
+                            return;
+                        }
                         continue;
                     }
                 };
@@ -297,27 +429,55 @@ impl MarketDataEngine {
                     ]).collect::<Vec<_>>()
                 });
                 if ws.send(Message::Text(sub.to_string())).await.is_err() {
+                    eprintln!(
+                        "market engine: WebSocket subscribe failed (attempt {})",
+                        attempt
+                    );
                     *engine.status.write().await = ConnectionStatus::Reconnecting;
                     let _ = ws.close(None).await;
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    let delay = backoff.next_delay();
+                    *engine.reconnect_backoff_cap.lock().unwrap() = backoff.cap();
+                    eprintln!(
+                        "market engine: reconnecting in {:?} (attempt {}, cap {:?})",
+                        delay,
+                        attempt,
+                        backoff.cap()
+                    );
+                    if !wait_interruptible(delay, &engine.shutdown, &engine.notify).await {
+                        return;
+                    }
                     continue;
                 }
 
                 *engine.status.write().await = ConnectionStatus::Connected;
-                backoff = Duration::from_secs(1);
+                // NOTE: do NOT reset backoff here. A successful TCP/WebSocket
+                // handshake alone is not evidence that the Bitget application
+                // connection is healthy; only a valid application-level text
+                // `"pong"` resets the backoff.
 
-                let mut hb = interval(Duration::from_secs(30));
+                let mut hb = interval(engine.heartbeat_interval);
                 hb.tick().await;
                 let mut last_pong = Instant::now();
+                let heartbeat_timeout = engine.heartbeat_timeout;
 
-                loop {
+                'connection: loop {
+                    // Intentional shutdown is not a retryable failure; exit
+                    // the connection loop promptly.
+                    if engine.shutdown.load(Ordering::SeqCst) {
+                        break 'connection;
+                    }
                     tokio::select! {
                         msg = ws.next() => {
                             match msg {
                                 Some(Ok(Message::Text(t))) => {
                                     if t == "pong" {
+                                        // Valid Bitget application-level text
+                                        // "pong" confirms the connection is
+                                        // healthy; reset the backoff for any
+                                        // subsequent disconnection.
                                         last_pong = Instant::now();
+                                        backoff.reset();
+                                        *engine.reconnect_backoff_cap.lock().unwrap() = backoff.cap();
                                         continue;
                                     }
                                     match parse_ticker_message(&t) {
@@ -426,19 +586,27 @@ impl MarketDataEngine {
                                     let _ = ws.send(Message::Pong(p)).await;
                                 }
                                 Some(Ok(Message::Pong(_))) => {
-                                    last_pong = Instant::now();
+                                    // WebSocket control-frame Pong is transport-level
+                                    // liveness only. It is NOT a Bitget
+                                    // application-level heartbeat response and
+                                    // must not refresh the application heartbeat
+                                    // deadline or reset the reconnect backoff.
                                 }
-                                Some(Ok(Message::Close(_))) | None => break,
-                                Some(Err(_)) => break,
+                                Some(Ok(Message::Close(_))) | None => break 'connection,
+                                Some(Err(_)) => break 'connection,
                                 _ => {}
                             }
                         }
                         _ = hb.tick() => {
                             if ws.send(Message::Text("ping".to_string())).await.is_err() {
-                                break;
+                                break 'connection;
                             }
-                            if last_pong.elapsed() > Duration::from_secs(35) {
-                                break;
+                            if last_pong.elapsed() > heartbeat_timeout {
+                                eprintln!(
+                                    "market engine: heartbeat timeout (attempt {}): no valid application-level pong received within {:?}",
+                                    attempt, heartbeat_timeout
+                                );
+                                break 'connection;
                             }
                         }
                     }
@@ -446,8 +614,17 @@ impl MarketDataEngine {
 
                 *engine.status.write().await = ConnectionStatus::Reconnecting;
                 let _ = ws.close(None).await;
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                let delay = backoff.next_delay();
+                *engine.reconnect_backoff_cap.lock().unwrap() = backoff.cap();
+                eprintln!(
+                    "market engine: reconnecting in {:?} (attempt {}, cap {:?})",
+                    delay,
+                    attempt,
+                    backoff.cap()
+                );
+                if !wait_interruptible(delay, &engine.shutdown, &engine.notify).await {
+                    return;
+                }
             }
         });
     }
@@ -1021,6 +1198,466 @@ mod tests {
         .await;
         assert!(got);
         let _ = server.await;
+    }
+
+    // ---- Reconnect backoff calculation tests ----
+
+    #[test]
+    fn backoff_initial_cap_is_one_second() {
+        let b = ReconnectBackoff::new();
+        assert_eq!(b.cap(), RECONNECT_BACKOFF_INITIAL);
+    }
+
+    #[test]
+    fn backoff_doubles_after_each_failure() {
+        let mut b = ReconnectBackoff::new();
+        assert_eq!(b.cap(), Duration::from_secs(1));
+        b.next_delay();
+        assert_eq!(b.cap(), Duration::from_secs(2));
+        b.next_delay();
+        assert_eq!(b.cap(), Duration::from_secs(4));
+        b.next_delay();
+        assert_eq!(b.cap(), Duration::from_secs(8));
+        b.next_delay();
+        assert_eq!(b.cap(), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn backoff_progression_caps_at_thirty_seconds() {
+        let mut b = ReconnectBackoff::new();
+        for _ in 0..10 {
+            b.next_delay();
+        }
+        assert_eq!(b.cap(), RECONNECT_BACKOFF_MAX);
+        b.next_delay();
+        assert_eq!(b.cap(), RECONNECT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn equal_jitter_within_bounds() {
+        let mut b = ReconnectBackoff::new();
+        for _ in 0..100 {
+            let cap = b.cap();
+            let half = cap / 2;
+            let delay = b.next_delay();
+            assert!(delay >= half, "delay {:?} below half-cap {:?}", delay, half);
+            assert!(delay <= cap, "delay {:?} above cap {:?}", delay, cap);
+        }
+    }
+
+    #[test]
+    fn no_overflow_after_many_failures() {
+        let mut b = ReconnectBackoff::new();
+        for _ in 0..10000 {
+            let delay = b.next_delay();
+            assert!(delay <= RECONNECT_BACKOFF_MAX);
+        }
+        assert_eq!(b.cap(), RECONNECT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn reset_returns_cap_to_initial() {
+        let mut b = ReconnectBackoff::new();
+        for _ in 0..5 {
+            b.next_delay();
+        }
+        assert_eq!(b.cap(), RECONNECT_BACKOFF_MAX);
+        b.reset();
+        assert_eq!(b.cap(), RECONNECT_BACKOFF_INITIAL);
+    }
+
+    // ---- Reconnect backoff lifecycle integration tests ----
+
+    async fn wait_for_status(engine: &MarketDataEngine, wanted: ConnectionStatus) {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if engine.connection_status().await == wanted {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn one_failed_session_advances_backoff_once() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.close(None).await;
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(200))
+                .with_heartbeat_timeout(Duration::from_millis(300)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Reconnecting).await;
+
+        // One failed session advances cap from 1s to 2s exactly once.
+        assert_eq!(
+            engine.reconnect_backoff_cap(),
+            Duration::from_secs(2),
+            "one failed session should advance backoff cap from 1s to 2s"
+        );
+
+        engine.stop();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn handshake_success_then_close_advances_backoff() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.send(Message::Text(r#"{"event":"subscribe","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"}}"#.to_string())).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = ws.close(None).await;
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(200))
+                .with_heartbeat_timeout(Duration::from_millis(300)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Reconnecting).await;
+
+        assert!(
+            engine.reconnect_backoff_cap() > Duration::from_secs(1),
+            "backoff cap should advance after handshake-then-close failure"
+        );
+
+        engine.stop();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn valid_application_pong_keeps_backoff_at_initial() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.send(Message::Text(r#"{"event":"subscribe","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"}}"#.to_string())).await;
+            // Respond to pings with application-level text "pong"
+            while let Some(Ok(Message::Text(t))) = ws.next().await {
+                if t == "ping" {
+                    let _ = ws.send(Message::Text("pong".to_string())).await;
+                }
+            }
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(100))
+                .with_heartbeat_timeout(Duration::from_millis(300)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Connected).await;
+
+        // Wait for several heartbeat cycles so a pong is exchanged.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            engine.reconnect_backoff_cap(),
+            Duration::from_secs(1),
+            "backoff cap should stay at initial after valid application pong"
+        );
+
+        engine.stop();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn control_frame_pong_does_not_prevent_heartbeat_timeout() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.send(Message::Text(r#"{"event":"subscribe","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"}}"#.to_string())).await;
+            // Respond to pings with control-frame Pong (NOT text "pong").
+            while let Some(Ok(Message::Text(t))) = ws.next().await {
+                if t == "ping" {
+                    let _ = ws.send(Message::Pong(t.into_bytes())).await;
+                }
+            }
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(50))
+                .with_heartbeat_timeout(Duration::from_millis(150)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Connected).await;
+
+        // Control-frame pong does not refresh the application heartbeat
+        // deadline, so the engine should time out and reconnect.
+        wait_for_status(&engine, ConnectionStatus::Reconnecting).await;
+
+        assert!(
+            engine.reconnect_backoff_cap() > Duration::from_secs(1),
+            "control-frame pong should not prevent heartbeat timeout or backoff advance"
+        );
+
+        engine.stop();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_text_does_not_reset_backoff() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.send(Message::Text(r#"{"event":"subscribe","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"}}"#.to_string())).await;
+            // Respond to pings with unrelated text.
+            while let Some(Ok(Message::Text(t))) = ws.next().await {
+                if t == "ping" {
+                    let _ = ws.send(Message::Text("hello_world".to_string())).await;
+                }
+            }
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(50))
+                .with_heartbeat_timeout(Duration::from_millis(150)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Connected).await;
+
+        // Unrelated text does not refresh the application heartbeat deadline.
+        wait_for_status(&engine, ConnectionStatus::Reconnecting).await;
+
+        assert!(
+            engine.reconnect_backoff_cap() > Duration::from_secs(1),
+            "unrelated text should not prevent heartbeat timeout or backoff advance"
+        );
+
+        engine.stop();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn heartbeat_timeout_reconnects_using_backoff() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.send(Message::Text(r#"{"event":"subscribe","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"}}"#.to_string())).await;
+            // Never respond to ping; go silent.
+            while ws.next().await.is_some() {}
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(50))
+                .with_heartbeat_timeout(Duration::from_millis(150)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Connected).await;
+
+        // Heartbeat timeout triggers reconnect with advanced backoff.
+        wait_for_status(&engine, ConnectionStatus::Reconnecting).await;
+
+        assert!(
+            engine.reconnect_backoff_cap() > Duration::from_secs(1),
+            "heartbeat timeout should advance backoff"
+        );
+
+        engine.stop();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn healthy_session_resets_backoff_to_initial() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+
+        // Server accepts two connections sequentially:
+        //  1st: close immediately → backoff advances.
+        //  2nd: respond with text "pong" → backoff resets.
+        let server = tokio::spawn(async move {
+            // First connection
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.close(None).await;
+
+            // Second connection
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.send(Message::Text(r#"{"event":"subscribe","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"}}"#.to_string())).await;
+            while let Some(Ok(Message::Text(t))) = ws.next().await {
+                if t == "ping" {
+                    let _ = ws.send(Message::Text("pong".to_string())).await;
+                }
+            }
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(200))
+                .with_heartbeat_timeout(Duration::from_millis(300)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Reconnecting).await;
+        assert!(
+            engine.reconnect_backoff_cap() > Duration::from_secs(1),
+            "first failure should advance backoff"
+        );
+
+        wait_for_status(&engine, ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            engine.reconnect_backoff_cap(),
+            Duration::from_secs(1),
+            "healthy session with valid pong should reset backoff to initial"
+        );
+
+        engine.stop();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_backoff_wait() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _ = ws.next().await; // subscribe
+            let _ = ws.close(None).await;
+        });
+
+        let engine = std::sync::Arc::new(
+            MarketDataEngine::new_with_url(vec!["BTCUSDT".to_string()], url)
+                .with_heartbeat_interval(Duration::from_millis(200))
+                .with_heartbeat_timeout(Duration::from_millis(300)),
+        );
+        engine.clone().start();
+
+        wait_for_status(&engine, ConnectionStatus::Reconnecting).await;
+
+        // Shutdown during backoff wait should exit promptly.
+        let shutdown_start = std::time::Instant::now();
+        engine.stop();
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if engine.connection_status().await == ConnectionStatus::Disconnected {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        let elapsed = shutdown_start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "shutdown should cancel reconnect wait promptly, took {:?}",
+            elapsed
+        );
+
+        let _ = server.await;
+    }
+
+    // ---- Shutdown notification race test ----
+
+    /// Verifies that `notify_one()` stores a permit when called before any
+    /// waiter exists, so a later `notified()` completes immediately.
+    ///
+    /// This eliminates the race where `stop()` is called after
+    /// `wait_interruptible`'s shutdown-flag check but before it registers
+    /// the notification future: with `notify_waiters()` the notification
+    /// would be lost and the task would sleep for the full backoff window;
+    /// with `notify_one()` the permit is stored and consumed by `notified()`.
+    #[tokio::test]
+    async fn notify_one_permit_available_before_wait() {
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::Notify;
+
+        let notify = Notify::new();
+        let shutdown = AtomicBool::new(false);
+
+        // Simulate stop() being called after the flag check but before
+        // wait_interruptible enters select!: notify_one() stores a permit.
+        notify.notify_one();
+
+        // wait_interruptible's flag check passes (shutdown == false), but
+        // notified() must complete immediately because the permit is stored.
+        let start = std::time::Instant::now();
+        let interrupted = wait_interruptible(Duration::from_secs(300), &shutdown, &notify).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            !interrupted,
+            "wait_interruptible should return false (interrupted)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "wait_interruptible should return promptly, not sleep for full delay, took {:?}",
+            elapsed
+        );
     }
 }
 use rustls::pki_types::ServerName;
