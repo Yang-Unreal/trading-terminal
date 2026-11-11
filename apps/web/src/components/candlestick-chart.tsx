@@ -11,10 +11,13 @@ import {
   type ISeriesApi,
   type ISeriesPrimitive,
   type ISeriesPrimitiveAxisView,
+  type IPrimitivePaneView,
+  type IPrimitivePaneRenderer,
   type SeriesAttachedParameter,
 } from "lightweight-charts";
 import type { Time, TickMarkType } from "lightweight-charts";
-import { type Candle, fetchCandles, fetchHistoryCandles, useCandles, type ChartGranularity } from "@/lib/market";
+import { type Candle, fetchCandles, fetchHistoryCandles, useCandles, useTicker, useTrades, type ChartGranularity } from "@/lib/market";
+import { ActiveCandleBuilder, type LiveTrade, bucketStartTime } from "@/lib/active-candle";
 import {
   formatDailyCandleDate,
   formatIntradayCandleTime,
@@ -35,6 +38,30 @@ const BULLISH_COLOR = "#22c55e";
 const BEARISH_COLOR = "#ef4444";
 const GRID_COLOR = "#2a2a2a";
 const INITIAL_HISTORY_LIMIT = 1000;
+
+/**
+ * Fixed stroke width (CSS pixels) for the current-price dashed line.
+ * Kept constant so the line thickness never varies with price, zoom or DPR.
+ */
+const CURRENT_PRICE_LINE_WIDTH = 1;
+
+/**
+ * Neutral label/line color used when there is no current-candle direction
+ * (e.g. close === open, or before any trade/native baseline establishes an
+ * open). Chosen for contrast against both dark chart background and light
+ * neutral background.
+ */
+const CURRENT_PRICE_NEUTRAL_COLOR = "#cbd5e1";
+
+/**
+ * Text color with sufficient contrast against the neutral background.
+ */
+const CURRENT_PRICE_NEUTRAL_TEXT_COLOR = "#0f172a";
+
+/**
+ * Text color with sufficient contrast against green / red backgrounds.
+ */
+const CURRENT_PRICE_DIRECTION_TEXT_COLOR = "#ffffff";
 const HISTORY_BATCH = 200;
 const MAX_DAY_SPAN_MS = 90 * 24 * 60 * 60 * 1000;
 const PREFETCH_THRESHOLD_BASE = 30;
@@ -138,6 +165,147 @@ class VolumeAxisPrimitive implements ISeriesPrimitive<Time> {
   }
 }
 
+/**
+ * Current-price indicator drawn on the candle series' right price scale.
+ *
+ * The label is rendered via `priceAxisViews()` and the dashed horizontal line
+ * is rendered on the pane canvas via `paneViews()`. Because the pane canvas is
+ * clipped to the chart plotting area, the line naturally terminates at the
+ * price-scale boundary — i.e. exactly at the left edge of the current-price
+ * axis label — and never extends underneath or through it.
+ *
+ * Unlike `lastValueVisible`/`priceLineVisible` (which track the last candle
+ * close), this primitive displays the latest accepted canonical price
+ * (the ActiveCandleBuilder close) independently of the candle OHLC data. It is
+ * updated only by genuine live ticker / trade messages; cached snapshots do not
+ * advance freshness.
+ */
+export class CurrentPricePrimitive implements ISeriesPrimitive<Time> {
+  private requestUpdate: (() => void) | null = null;
+  private candleSeriesRef: React.MutableRefObject<ISeriesApi<"Candlestick", Time> | null>;
+  private _price: number | null = null;
+  /**
+   * Current candle's open price, owned by the component and reset on
+   * symbol/granularity changes. Read at `setPrice` time to compute direction.
+   */
+  private candleOpenRef: { current: number | null };
+  /** Current label background / line color. */
+  private _color: string = CURRENT_PRICE_NEUTRAL_COLOR;
+  /** Cached Y coordinate (CSS pixels). Null when no price or off-scale. */
+  private _y: number | null = null;
+
+  constructor(
+    candleSeriesRef: React.MutableRefObject<ISeriesApi<"Candlestick", Time> | null>,
+    candleOpenRef: { current: number | null },
+  ) {
+    this.candleSeriesRef = candleSeriesRef;
+    this.candleOpenRef = candleOpenRef;
+  }
+
+  attached(param: SeriesAttachedParameter<Time>): void {
+    this.requestUpdate = param.requestUpdate;
+  }
+
+  detached(): void {
+    this.requestUpdate = null;
+  }
+
+  /**
+   * Accept a new canonical close price and resolve its direction color from
+   * the current candle's open (close > open → green, close < open → red,
+   * otherwise neutral).
+   */
+  setPrice(close: number | null): void {
+    if (close == null) {
+      this._price = null;
+      this._color = CURRENT_PRICE_NEUTRAL_COLOR;
+      this._y = null;
+      this.requestUpdate?.();
+      return;
+    }
+
+    const open = this.candleOpenRef.current;
+    let color: string;
+    if (open == null) {
+      color = CURRENT_PRICE_NEUTRAL_COLOR;
+    } else if (close > open) {
+      color = BULLISH_COLOR;
+    } else if (close < open) {
+      color = BEARISH_COLOR;
+    } else {
+      color = CURRENT_PRICE_NEUTRAL_COLOR;
+    }
+
+    this._price = close;
+    this._color = color;
+    this.requestUpdate?.();
+  }
+
+  updateAllViews(): void {
+    const candleSeries = this.candleSeriesRef.current;
+    if (!candleSeries || this._price == null) {
+      this._y = null;
+      return;
+    }
+    const coord = candleSeries.priceToCoordinate(this._price);
+    this._y = coord === null ? null : coord;
+  }
+
+  priceAxisViews(): readonly ISeriesPrimitiveAxisView[] {
+    if (this._price == null || this._y == null) return [];
+    return [
+      {
+        coordinate: () => this._y!,
+        text: () => formatPriceValue(this._price!),
+        textColor: () =>
+          this._color === CURRENT_PRICE_NEUTRAL_COLOR
+            ? CURRENT_PRICE_NEUTRAL_TEXT_COLOR
+            : CURRENT_PRICE_DIRECTION_TEXT_COLOR,
+        backColor: () => this._color,
+        visible: () => true,
+        tickVisible: () => true,
+      },
+    ];
+  }
+
+  paneViews(): readonly IPrimitivePaneView[] {
+    if (this._y == null) return [];
+    return [
+      {
+        zOrder: () => "top",
+        renderer: () => ({
+          // `CanvasRenderingTarget2D` lives in `fancy-canvas`, which is not
+          // directly importable from this package under pnpm strictness, so the
+          // render target is typed as `any` here. The runtime shape is the
+          // fancy-canvas `CanvasRenderingTarget2D` (useBitmapCoordinateSpace).
+          draw: (target: any) => {
+            target.useBitmapCoordinateSpace((scope: any) => {
+              const { context: ctx, verticalPixelRatio, bitmapSize } = scope;
+              // Convert the media/CSS Y coordinate (from priceToCoordinate) to
+              // device pixels and pixel-align it so the fixed-width stroke is
+              // crisp at any vertical position, zoom level or DPR.
+              const y = Math.round(this._y! * verticalPixelRatio);
+              const width = bitmapSize.width;
+              ctx.save();
+              ctx.strokeStyle = this._color;
+              // Visual thickness is 1 CSS pixel everywhere, regardless of DPR.
+              ctx.lineWidth = CURRENT_PRICE_LINE_WIDTH * verticalPixelRatio;
+              // Dash pattern scaled to device pixels so it stays consistent.
+              ctx.setLineDash([6 * verticalPixelRatio, 4 * verticalPixelRatio]);
+              ctx.lineDashOffset = 0;
+              ctx.beginPath();
+              ctx.moveTo(0, y);
+              ctx.lineTo(width, y);
+              ctx.stroke();
+              ctx.restore();
+            });
+          },
+        }),
+      },
+    ];
+  }
+}
+
 function toUtcSeconds(ms: number): Time {
   return Math.floor(ms / 1000) as unknown as Time;
 }
@@ -189,6 +357,10 @@ function formatVolume(volume: number): string {
   return volume.toFixed(2);
 }
 
+function formatPriceValue(price: number): string {
+  return parseFloat(price.toFixed(6)).toString();
+}
+
 function candlesToPoints(
   candles: Candle[],
 ): { candlePoints: CandlePoint[]; volumePoints: VolumePoint[] } {
@@ -228,6 +400,22 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
   const olderHistoryRequestIdRef = useRef(0);
   const liveBufferRef = useRef<Map<number, Candle>>(new Map());
   const candlesMapRef = useRef<Map<number, Candle>>(new Map());
+  const currentPricePrimitiveRef = useRef<CurrentPricePrimitive | null>(null);
+  const currentPriceRef = useRef<number | null>(null);
+  const builderRef = useRef(new ActiveCandleBuilder());
+  const activeCandleRef = useRef<{ startTime: number; close: number; tradeCount: number } | null>(null);
+  const lastTradeIdRef = useRef<string | null>(null);
+  // Once a live Trade has established the canonical chart price, the ticker
+  // fallback must not independently overwrite it. Reset on symbol/granularity
+  // change so a fresh symbol can be initialized by ticker before trades flow.
+  const tradePriceSetRef = useRef(false);
+  // Debounce timer for visibility-change resume catch-up; avoids repeated
+  // REST catch-up requests when the user toggles tab visibility rapidly.
+  const resumeTimerRef = useRef<number | null>(null);
+  // Current candle's open price, used by the primitive to compute direction
+  // (close vs open). Survives granularity changes (same symbol) so direction is
+  // not unnecessarily reset; reset on symbol changes.
+  const currentCandleOpenRef = useRef<number | null>(null);
   const loadingOlderRef = useRef(false);
   const hasMoreHistoryRef = useRef(true);
   const oldestTimestampRef = useRef<number | null>(null);
@@ -247,6 +435,8 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
   granularityRef.current = granularity;
 
   const candles = useCandles(symbol, granularity);
+  const ticker = useTicker(symbol);
+  const trades = useTrades(symbol);
 
   useImperativeHandle(ref, () => ({
     autoScale: () => {
@@ -272,21 +462,6 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
       if (!chart || !candleSeries || !volumeSeries) return;
       candleSeries.setData(candlePoints);
       volumeSeries.setData(volumePoints);
-    },
-    [],
-  );
-
-  const applyLiveCandle = useCallback(
-    (c: Candle) => {
-      const chart = chartRef.current;
-      const candleSeries = candleSeriesRef.current;
-      const volumeSeries = volumeSeriesRef.current;
-      if (!chart || !candleSeries || !volumeSeries) return;
-      const cp = toCandlePoint(c);
-      const vp = toVolumePoint(c);
-      if (!cp || !vp) return;
-      candleSeries.update(cp);
-      volumeSeries.update(vp);
     },
     [],
   );
@@ -345,6 +520,95 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
     primitive.setData(volumeValue, volumeColor, y);
   }, []);
 
+  const renderCandle = useCallback(
+    (c: Candle) => {
+      const chart = chartRef.current;
+      const candleSeries = candleSeriesRef.current;
+      const volumeSeries = volumeSeriesRef.current;
+      if (!chart || !candleSeries || !volumeSeries) return;
+      const cp = toCandlePoint(c);
+      const vp = toVolumePoint(c);
+      if (!cp || !vp) return;
+      const map = candlesMapRef.current;
+      const existing = map.get(c.startTime);
+      map.set(c.startTime, c);
+      const allCandles = Array.from(map.values()).sort(
+        (a, b) => a.startTime - b.startTime,
+      );
+      const { candlePoints, volumePoints } = candlesToPoints(allCandles);
+      const isNewBucket = !existing;
+      if (isNewBucket) {
+        candleSeries.setData(candlePoints);
+        volumeSeries.setData(volumePoints);
+      } else {
+        const lastPoint = candlePoints[candlePoints.length - 1];
+        if (lastPoint && lastPoint.time === cp.time) {
+          candleSeries.update(cp);
+          volumeSeries.update(vp);
+        }
+      }
+      updateVolumeMarkerForVisibleRange();
+    },
+    [updateVolumeMarkerForVisibleRange],
+  );
+
+  // Apply a trade-driven active candle to the chart without rebuilding the
+  // whole series on every trade. Same-bucket updates use series.update();
+  // only a bucket rollover falls back to setData via renderCandle.
+  const applyTradeCandleToChart = useCallback(
+    (active: { startTime: number; open: number; high: number; low: number; close: number; volume: number }, price: number) => {
+      const chart = chartRef.current;
+      const candleSeries = candleSeriesRef.current;
+      const volumeSeries = volumeSeriesRef.current;
+      if (!chart || !candleSeries || !volumeSeries) return;
+
+      const cp: CandlePoint = {
+        time: toUtcSeconds(active.startTime),
+        open: active.open,
+        high: active.high,
+        low: active.low,
+        close: active.close,
+      };
+
+      const map = candlesMapRef.current;
+      const lastTime = map.size > 0 ? Math.max(...Array.from(map.keys())) : null;
+      const bsActive = bucketStartTime(active.startTime, granularity as ChartGranularity);
+      const bsLast = lastTime !== null ? bucketStartTime(lastTime, granularity as ChartGranularity) : null;
+      const isSameBucket = lastTime !== null && bsActive === bsLast;
+
+      if (isSameBucket) {
+        candleSeries.update(cp);
+        const native = map.get(active.startTime);
+        const vol = native ? parsePrice(native.baseVolume) : null;
+        if (vol != null) {
+          const vp: VolumePoint = {
+            time: cp.time,
+            value: vol,
+            color: active.close >= active.open ? BULLISH_COLOR : BEARISH_COLOR,
+          };
+          volumeSeries.update(vp);
+        }
+        updateVolumeMarkerForVisibleRange();
+      } else {
+        // New bucket: rebuild the series once (rare, on bucket rollover).
+        const native = map.get(active.startTime);
+        renderCandle({
+          ...(native ?? {}),
+          startTime: active.startTime,
+          open: String(active.open),
+          high: String(active.high),
+          low: String(active.low),
+          close: String(active.close),
+          baseVolume: String(active.volume),
+        } as Candle);
+      }
+
+      currentPriceRef.current = price;
+      currentPricePrimitiveRef.current?.setPrice(price);
+    },
+    [renderCandle, updateVolumeMarkerForVisibleRange],
+  );
+
   const loadHistory = useCallback(async () => {
     if (!symbol || !granularity) return;
     const requestId = ++requestIdRef.current;
@@ -385,6 +649,38 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
       const { candlePoints, volumePoints } = candlesToPoints(allCandles);
       applySeriesData(candlePoints, volumePoints);
 
+      // Re-apply the latest ticker price now that the price scale is ready,
+      // in case a ticker message arrived while history was still loading.
+      if (currentPriceRef.current != null) {
+        currentPricePrimitiveRef.current?.setPrice(currentPriceRef.current);
+      }
+
+      // Flush live candles buffered while history was loading, replacing by
+      // start timestamp so the latest update for the active bucket wins.
+      if (liveBufferRef.current.size > 0) {
+        const buffered = Array.from(liveBufferRef.current.values()).sort(
+          (a, b) => a.startTime - b.startTime,
+        );
+        liveBufferRef.current.clear();
+        const map = candlesMapRef.current;
+        for (const c of buffered) {
+          map.set(c.startTime, c);
+        }
+        const flushedAll = Array.from(map.values()).sort(
+          (a, b) => a.startTime - b.startTime,
+        );
+        const { candlePoints: fp, volumePoints: fv } = candlesToPoints(flushedAll);
+        applySeriesData(fp, fv);
+      }
+
+      // Flush any trade-driven active candle accumulated while history was
+      // loading so live updates received during initialization are not lost.
+      if (requestIdRef.current !== requestId) return;
+      const active = builderRef.current.getActive(symbol, granularity as ChartGranularity);
+      if (active && active.tradeCount > 0) {
+        applyTradeCandleToChart(active, active.close);
+      }
+
       if (requestIdRef.current !== requestId) return;
       const chart = chartRef.current;
       const candleSeries = candleSeriesRef.current;
@@ -399,8 +695,15 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
       const visibleBars = Math.max(1, Math.ceil(timeScaleWidth / barSpacing));
       const totalBars = candlePoints.length;
       const visibleCount = Math.min(visibleBars, totalBars);
-      const from = Math.max(0, totalBars - visibleCount - RIGHT_OFFSET_BARS);
-      const to = Math.max(0, totalBars - RIGHT_OFFSET_BARS);
+      const latestIndex = totalBars - 1;
+      // Right edge: latest candle plus `RIGHT_OFFSET_BARS` empty bars after it.
+      const to = latestIndex + RIGHT_OFFSET_BARS;
+      // Left edge: show `visibleCount` bars ending at the latest candle,
+      // clamped to 0 when fewer candles than the viewport can show.
+      let from = latestIndex - visibleCount + 1;
+      if (from < 0) {
+        from = 0;
+      }
       debugHistory("loadHistory: setting initial visible range", {
         requestId,
         totalBars,
@@ -682,6 +985,8 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
       borderVisible: false,
       wickUpColor: BULLISH_COLOR,
       wickDownColor: BEARISH_COLOR,
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     const volumeSeriesApi = chart.addSeries(HistogramSeries, {
       priceScaleId: "",
@@ -710,6 +1015,10 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
     const volumeAxisPrimitive = new VolumeAxisPrimitive(volumeSeriesRef);
     candleSeriesApi.attachPrimitive(volumeAxisPrimitive);
 
+    const currentPricePrimitive = new CurrentPricePrimitive(candleSeriesRef, currentCandleOpenRef);
+    candleSeriesApi.attachPrimitive(currentPricePrimitive);
+    currentPricePrimitiveRef.current = currentPricePrimitive;
+
     chartRef.current = chart;
     candleSeriesRef.current = candleSeriesApi;
     volumeSeriesRef.current = volumeSeriesApi;
@@ -717,13 +1026,15 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
 
     return () => {
       candleSeriesApi.detachPrimitive(volumeAxisPrimitive);
+      const currentPricePrimitive = currentPricePrimitiveRef.current;
+      if (currentPricePrimitive) candleSeriesApi.detachPrimitive(currentPricePrimitive);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       volumeAxisPrimitiveRef.current = null;
     };
-  }, [granularity]);
+  }, [symbol, granularity]);
 
   // 2. Subscribe to visible logical range changes for volume marker sync and older history pagination
   useEffect(() => {
@@ -835,47 +1146,222 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
     loadHistory();
   }, [loadHistory]);
 
+  // 4. Update the current-price indicator whenever the live ticker changes.
+  // Only genuine live ticker messages (`isSnapshot: false`) update
+  // `state.tickers[symbol].last`, so a cached snapshot only initializes the
+  // displayed price without marking it live.
+  //
+  // Ticker may initialize the displayed price before live Trades are
+  // available, but once the first accepted live Trade for the current symbol
+  // has established the canonical price (via the ActiveCandleBuilder close),
+  // subsequent ticker messages must not independently overwrite it.
+  useEffect(() => {
+    if (tradePriceSetRef.current) return;
+    const price = parsePrice(ticker?.last);
+    currentPriceRef.current = price ?? null;
+    currentPricePrimitiveRef.current?.setPrice(price ?? null);
+  }, [ticker?.last]);
+
   // 4. Apply live candle updates from the store
   useEffect(() => {
     if (!candles.length) return;
     const latest = candles[candles.length - 1];
     if (!latest) return;
 
-    const map = candlesMapRef.current;
-    const existing = map.get(latest.startTime);
-    if (existing && existing.source === "websocket") return;
+    const open = parsePrice(latest.open);
+    const high = parsePrice(latest.high);
+    const low = parsePrice(latest.low);
+    const close = parsePrice(latest.close);
+    const volume = parsePrice(latest.baseVolume);
+    if (open == null || high == null || low == null || close == null) return;
 
+    const map = candlesMapRef.current;
     map.set(latest.startTime, latest);
 
-    let allCandles = Array.from(map.values()).sort((a, b) => a.startTime - b.startTime);
+    // Seed / reconcile the provisional trade-driven active candle from the
+    // authoritative native baseline. seedFromNative never regresses a
+    // trade-driven Close / High / Low and confirms Open exactly once, so this
+    // is safe to run on every native update for the active bucket.
+    builderRef.current.seedFromNative(symbol, granularity as ChartGranularity, {
+      startTime: latest.startTime,
+      open,
+      high,
+      low,
+      close,
+      volume: volume ?? 0,
+      tsReceived: latest.tsReceived ?? 0,
+    });
 
-    const { candlePoints, volumePoints } = candlesToPoints(allCandles);
+    // Read the freshly reconciled builder state so the rendered candle uses
+    // the canonical Open (immutable once confirmed) and Close (never
+    // regressed by a delayed native update) rather than the native Open,
+    // which can flip the rendered Open back and forth.
+    const active = builderRef.current.getActive(symbol, granularity as ChartGranularity);
+    if (active) currentCandleOpenRef.current = active.open;
+
+    let candle: Candle = latest;
+    if (
+      active &&
+      active.tradeCount > 0 &&
+      active.startTime ===
+        bucketStartTime(latest.startTime, granularity as ChartGranularity)
+    ) {
+      candle = {
+        ...latest,
+        open: String(active.open),
+        high: String(active.high),
+        low: String(active.low),
+        close: String(active.close),
+        baseVolume: String(volume ?? latest.baseVolume),
+      };
+    }
 
     if (loading) {
-      liveBufferRef.current.set(latest.startTime, latest);
+      liveBufferRef.current.set(candle.startTime, candle);
       return;
     }
 
+    renderCandle(candle);
+  }, [candles, loading, renderCandle, symbol, granularity]);
+
+  // 5. Drive the active candle and chart price indicator from accepted live trades.
+  // Only genuine live Trade messages (`isSnapshot: false`) are accepted; cached
+  // snapshot replays are ignored and never establish live freshness.
+  useEffect(() => {
+    const latest = trades[0];
+    if (!latest || latest.isSnapshot) return;
+    if (lastTradeIdRef.current === latest.tradeId) return;
+
+    const price = parsePrice(latest.price);
+    const size = parsePrice(latest.size);
+    const tsExchange = latest.tsExchange;
+    if (price == null || size == null || tsExchange == null) return;
+    if (!Number.isFinite(tsExchange) || tsExchange <= 0) return;
+
+    lastTradeIdRef.current = latest.tradeId;
+
+    const liveTrade: LiveTrade = {
+      tradeId: latest.tradeId,
+      symbol: latest.symbol,
+      price,
+      size,
+      side: latest.side,
+      tsExchange,
+    };
+
+    const updated = builderRef.current.processTrade(symbol, granularity as ChartGranularity, liveTrade);
+    if (!updated) return;
+
+    activeCandleRef.current = {
+      startTime: updated.startTime,
+      close: updated.close,
+      tradeCount: updated.tradeCount,
+    };
+    currentCandleOpenRef.current = updated.open;
+
+    // The canonical chart price is the Builder's resulting close. Passing the
+    // raw incoming trade price here would let an out-of-order (rejected from
+    // changing Close) trade regress the current-price indicator.
+    tradePriceSetRef.current = true;
+    if (loading) {
+      // Defer chart rendering until initial history has hydrated so we never
+      // flash a single trade candle before the full historical dataset is
+      // ready. The accumulated trade state is flushed in loadHistory once
+      // REST completes.
+      return;
+    }
+    applyTradeCandleToChart(updated, updated.close);
+  }, [trades, symbol, granularity]);
+
+  // 6. Clear provisional live state when the symbol or granularity changes so
+  //    trades for another symbol / bucket can never affect the current chart.
+  //    Also resets trade-price precedence so ticker may initialize the new
+  //    symbol's price before trades flow.
+  useEffect(() => {
+    return () => {
+      builderRef.current.clear(symbol, granularity as ChartGranularity);
+      activeCandleRef.current = null;
+      lastTradeIdRef.current = null;
+      tradePriceSetRef.current = false;
+      currentCandleOpenRef.current = null;
+    };
+  }, [symbol, granularity]);
+
+  // 2F-1C.2.10 Issue 2: Background-tab resume catch-up.
+  // When the tab transitions hidden -> visible, perform a single debounced REST
+  // catch-up to reconcile the latest candles with accepted live trade state.
+  // No second WebSocket connection, no background polling, no viewport change.
+  const performResumeCatchup = useCallback(async () => {
+    const symbol = symbolRef.current;
+    const granularity = granularityRef.current;
     const chart = chartRef.current;
     const candleSeries = candleSeriesRef.current;
-    const volumeSeries = volumeSeriesRef.current;
-    if (!chart || !candleSeries || !volumeSeries) return;
-
-    const cp = toCandlePoint(latest);
-    const vp = toVolumePoint(latest);
-    if (!cp || !vp) return;
-
-    const lastPoint = candlePoints[candlePoints.length - 1];
-    if (lastPoint && lastPoint.time === cp.time) {
-      candleSeries.update(cp);
-      volumeSeries.update(vp);
-    } else {
-      candleSeries.setData(candlePoints);
-      volumeSeries.setData(volumePoints);
+    if (!symbol || !granularity || !chart || !candleSeries) return;
+    try {
+      const now = Date.now();
+      const recent = await fetchCandles(symbol, granularity, 100, undefined, now);
+      const map = candlesMapRef.current;
+      for (const c of recent) {
+        builderRef.current.seedFromNative(symbol, granularity as ChartGranularity, {
+          startTime: c.startTime,
+          open: parsePrice(c.open) ?? 0,
+          high: parsePrice(c.high) ?? 0,
+          low: parsePrice(c.low) ?? 0,
+          close: parsePrice(c.close) ?? 0,
+          volume: parsePrice(c.baseVolume) ?? 0,
+          tsReceived: c.tsReceived ?? 0,
+        });
+        map.set(c.startTime, c);
+      }
+      // A trade-driven active candle wins for its bucket over REST data.
+      const active = builderRef.current.getActive(symbol, granularity as ChartGranularity);
+      if (active && active.tradeCount > 0) {
+        const activeCandle: Candle = {
+          startTime: active.startTime,
+          open: String(active.open),
+          high: String(active.high),
+          low: String(active.low),
+          close: String(active.close),
+          baseVolume: String(active.volume),
+          quoteVolume: "",
+          tsReceived: Date.now(),
+          source: "trade",
+        };
+        map.set(active.startTime, activeCandle);
+        currentCandleOpenRef.current = active.open;
+      }
+      // Render one complete, merged dataset so the chart never flashes an
+      // incomplete candle set; the viewport is left untouched.
+      const all = Array.from(map.values()).sort((a, b) => a.startTime - b.startTime);
+      const { candlePoints, volumePoints } = candlesToPoints(all);
+      applySeriesData(candlePoints, volumePoints);
+      updateVolumeMarkerForVisibleRange();
+    } catch {
+      // Silent catch-up failure: do not surface an error to the user; live
+      // updates resume over the WebSocket once it reconnects.
     }
+  }, [applySeriesData, updateVolumeMarkerForVisibleRange]);
 
-    updateVolumeMarkerForVisibleRange();
-  }, [candles, loading, updateVolumeMarkerForVisibleRange]);
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      if (resumeTimerRef.current !== null) {
+        window.clearTimeout(resumeTimerRef.current);
+      }
+      resumeTimerRef.current = window.setTimeout(() => {
+        resumeTimerRef.current = null;
+        performResumeCatchup();
+      }, 400);
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (resumeTimerRef.current !== null) {
+        window.clearTimeout(resumeTimerRef.current);
+        resumeTimerRef.current = null;
+      }
+    };
+  }, [performResumeCatchup]);
 
   // 5. Resize handler
   useEffect(() => {

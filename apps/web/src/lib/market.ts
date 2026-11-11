@@ -43,6 +43,7 @@ export interface Trade {
   tsExchange?: number | null;
   tsReceived?: number | null;
   source?: string | null;
+  isSnapshot: boolean;
 }
 
 export interface Candle {
@@ -68,6 +69,10 @@ interface State {
   orderBookLastUpdate: number | null;
   tradesLastUpdate: number | null;
   candleLastUpdate: number | null;
+  tickerLastWsAtMono: Record<string, number>;
+  orderBookLastWsAtMono: Record<string, number>;
+  tradeLastWsAtMono: Record<string, number>;
+  candleLastWsAtMono: Record<string, Record<string, number>>;
   stale: boolean;
   orderBookStale: boolean;
   tradesStale: boolean;
@@ -76,7 +81,7 @@ interface State {
   candleError: string | null;
 }
 
-let state: State = {
+export let state: State = {
   tickers: {},
   orderBooks: {},
   trades: {},
@@ -86,6 +91,10 @@ let state: State = {
   orderBookLastUpdate: null,
   tradesLastUpdate: null,
   candleLastUpdate: null,
+  tickerLastWsAtMono: {},
+  orderBookLastWsAtMono: {},
+  tradeLastWsAtMono: {},
+  candleLastWsAtMono: {},
   stale: false,
   orderBookStale: false,
   tradesStale: false,
@@ -136,6 +145,9 @@ function connect() {
             tsReceived: d.tsReceived ?? null,
           };
           state.tickers[t.symbol] = t;
+          if (d.isSnapshot === false) {
+            state.tickerLastWsAtMono[t.symbol] = performance.now();
+          }
           setState({ tickers: { ...state.tickers }, lastUpdate: Date.now(), stale: false });
         }
       }
@@ -151,6 +163,9 @@ function connect() {
           source: d.source ?? null,
         };
         state.orderBooks[book.symbol] = book;
+        if (d.isSnapshot === false) {
+          state.orderBookLastWsAtMono[book.symbol] = performance.now();
+        }
         setState({ orderBooks: { ...state.orderBooks }, orderBookLastUpdate: Date.now(), orderBookStale: false });
       }
       if (msg.type === "trade") {
@@ -164,10 +179,14 @@ function connect() {
           tsExchange: d.tsExchange ?? null,
           tsReceived: d.tsReceived ?? null,
           source: d.source ?? null,
+          isSnapshot: d.isSnapshot === true,
         };
         const existing = state.trades[trade.symbol] ?? [];
         const updated = [trade, ...existing].slice(0, 100);
         state.trades[trade.symbol] = updated;
+        if (d.isSnapshot === false) {
+          state.tradeLastWsAtMono[trade.symbol] = performance.now();
+        }
         setState({ trades: { ...state.trades }, tradesLastUpdate: Date.now(), tradesStale: false });
       }
       if (msg.type === "trades") {
@@ -182,11 +201,15 @@ function connect() {
           tsExchange: t.tsExchange ?? null,
           tsReceived: t.tsReceived ?? null,
           source: t.source ?? null,
+          isSnapshot: d.isSnapshot === true,
         }));
         const existing = state.trades[symbol] ?? [];
         const seen = new Set(existing.map((t) => t.tradeId));
         const merged = [...incoming.filter((t) => !seen.has(t.tradeId)), ...existing].slice(0, 100);
         state.trades[symbol] = merged;
+        if (d.isSnapshot === false) {
+          state.tradeLastWsAtMono[symbol] = performance.now();
+        }
         setState({ trades: { ...state.trades }, tradesLastUpdate: Date.now(), tradesStale: false });
       }
       if (msg.type === "candle") {
@@ -218,6 +241,11 @@ function connect() {
         }
         byGranularity[granularity] = updated;
         state.candles[symbol] = { ...byGranularity };
+        const candleMonoBySymbol = state.candleLastWsAtMono[symbol] ?? {};
+        state.candleLastWsAtMono[symbol] = {
+          ...candleMonoBySymbol,
+          [granularity]: performance.now(),
+        };
         setState({ candles: { ...state.candles }, candleLastUpdate: Date.now(), candleStale: false, candleError: null });
       }
     } catch {

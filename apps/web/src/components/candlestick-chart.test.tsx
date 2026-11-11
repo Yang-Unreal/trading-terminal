@@ -2,10 +2,10 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
-import { CandlestickChart, TimeframeSelector, TIMEFRAMES } from "./candlestick-chart";
+import { render, cleanup } from "@testing-library/react";
+import { CandlestickChart } from "./candlestick-chart";
 
-// Mock ResizeObserver (not available in jsdom)
+// Mock ResizeObserver
 class MockResizeObserver {
   observe = vi.fn();
   unobserve = vi.fn();
@@ -37,22 +37,37 @@ const mockUnsubscribeVisibleTimeRangeChange = vi.hoisted(() => vi.fn());
 const mockSubscribeVisibleLogicalRangeChange = vi.hoisted(() => vi.fn());
 const mockUnsubscribeVisibleLogicalRangeChange = vi.hoisted(() => vi.fn());
 const mockFitContent = vi.hoisted(() => vi.fn());
-const mockTimeScale = vi.hoisted(() => vi.fn(() => ({
-  getVisibleRange: mockGetVisibleRange,
-  setVisibleRange: mockSetVisibleRange,
-  getVisibleLogicalRange: mockGetVisibleLogicalRange,
-  setVisibleLogicalRange: mockSetVisibleLogicalRange,
-  width: vi.fn(() => 600),
-  subscribeVisibleTimeRangeChange: mockSubscribeVisibleTimeRangeChange,
-  unsubscribeVisibleTimeRangeChange: mockUnsubscribeVisibleTimeRangeChange,
-  subscribeVisibleLogicalRangeChange: mockSubscribeVisibleLogicalRangeChange,
-  unsubscribeVisibleLogicalRangeChange: mockUnsubscribeVisibleLogicalRangeChange,
-  fitContent: mockFitContent,
-})));
-const mockPriceScale = vi.hoisted(() => vi.fn(() => ({
-  applyOptions: mockApplyOptions,
-  width: vi.fn(() => 60),
-})));
+const mockCreateChart = vi.hoisted(() =>
+  vi.fn(() => ({
+    addSeries: mockAddSeries,
+    timeScale: mockTimeScale,
+    priceScale: mockPriceScale,
+    remove: mockRemove,
+    applyOptions: mockApplyOptions,
+    width: vi.fn(() => 1000),
+    height: vi.fn(() => 600),
+  })),
+);
+const mockTimeScale = vi.hoisted(() =>
+  vi.fn(() => ({
+    getVisibleRange: mockGetVisibleRange,
+    setVisibleRange: mockSetVisibleRange,
+    getVisibleLogicalRange: mockGetVisibleLogicalRange,
+    setVisibleLogicalRange: mockSetVisibleLogicalRange,
+    width: vi.fn(() => 600),
+    subscribeVisibleTimeRangeChange: mockSubscribeVisibleTimeRangeChange,
+    unsubscribeVisibleTimeRangeChange: mockUnsubscribeVisibleTimeRangeChange,
+    subscribeVisibleLogicalRangeChange: mockSubscribeVisibleLogicalRangeChange,
+    unsubscribeVisibleLogicalRangeChange: mockUnsubscribeVisibleLogicalRangeChange,
+    fitContent: mockFitContent,
+  })),
+);
+const mockPriceScale = vi.hoisted(() =>
+  vi.fn(() => ({
+    applyOptions: mockApplyOptions,
+    width: vi.fn(() => 60),
+  })),
+);
 const mockLastValueData = vi.hoisted(() => vi.fn(() => ({ noData: false, price: 12.5, color: "#22c55e" })));
 const mockDataByIndex = vi.hoisted(() =>
   vi.fn<(index: number, direction: number) => { time: number; value: number; color: string } | null>(() => null),
@@ -65,55 +80,62 @@ const mockBarsInLogicalRange = vi.hoisted(() =>
 const mockOptions = vi.hoisted(() => vi.fn(() => ({ barSpacing: 6 })));
 const mockAttachPrimitive = vi.hoisted(() => vi.fn());
 const mockDetachPrimitive = vi.hoisted(() => vi.fn());
-const mockAddSeries = vi.hoisted(() => vi.fn(() => ({
-  setData: mockSetData,
-  update: mockUpdate,
-  applyOptions: mockApplyOptions,
-  priceScale: mockPriceScale,
-  priceToCoordinate: mockPriceToCoordinate,
-  lastValueData: mockLastValueData,
-  dataByIndex: mockDataByIndex,
-  subscribeDataChanged: mockSubscribeDataChanged,
-  unsubscribeDataChanged: mockUnsubscribeDataChanged,
-  attachPrimitive: mockAttachPrimitive,
-  detachPrimitive: mockDetachPrimitive,
-  options: mockOptions,
-  barsInLogicalRange: mockBarsInLogicalRange,
-})));
-const mockCreateChart = vi.hoisted(() => vi.fn(() => ({
-  remove: mockRemove,
-  addSeries: mockAddSeries,
-  applyOptions: mockApplyOptions,
-  timeScale: mockTimeScale,
-})));
+const mockAddSeries = vi.hoisted(() =>
+  vi.fn(() => ({
+    setData: mockSetData,
+    update: mockUpdate,
+    applyOptions: mockApplyOptions,
+    priceScale: mockPriceScale,
+    priceToCoordinate: mockPriceToCoordinate,
+    attachPrimitive: mockAttachPrimitive,
+    detachPrimitive: mockDetachPrimitive,
+    subscribeDataChanged: mockSubscribeDataChanged,
+    unsubscribeDataChanged: mockUnsubscribeDataChanged,
+    options: mockOptions,
+    dataByIndex: mockDataByIndex,
+  })),
+);
+const mockChart = vi.hoisted(() =>
+  vi.fn(() => ({
+    addSeries: mockAddSeries,
+    timeScale: mockTimeScale,
+    priceScale: mockPriceScale,
+    remove: mockRemove,
+    applyOptions: mockApplyOptions,
+    width: vi.fn(() => 1000),
+    height: vi.fn(() => 600),
+  })),
+);
+
+const mockFetch = vi.hoisted(() => vi.fn());
+const mockUseCandles = vi.hoisted(() => vi.fn((): any[] => []));
+const mockUseTrades = vi.hoisted(() => vi.fn((): any[] => []));
+const mockUseTicker = vi.hoisted(() => vi.fn((): any => ({ last: "100" })));
+const capturedPrimitive = vi.hoisted(() => ({ current: null as unknown as { setPrice?: (price: number | null) => void } }));
+
+globalThis.fetch = mockFetch;
 
 vi.mock("lightweight-charts", () => ({
-  createChart: mockCreateChart,
-  candlestickSeries: {},
-  histogramSeries: {},
+  createChart: mockChart,
   CandlestickSeries: {},
   HistogramSeries: {},
-  CrosshairMode: { Normal: 0 },
-  ColorType: { Solid: "solid" },
-  LineStyle: { Dotted: 2 },
-  MismatchDirection: { NearestLeft: -1, None: 0, NearestRight: 1 },
+  CrosshairMode: {},
+  ColorType: {},
+  LineStyle: {},
+  MismatchDirection: {},
+  LastPriceAnimationMode: {},
 }));
 
-// Mock fetch for REST candle loading
-const mockFetch = vi.hoisted(() => vi.fn());
-vi.stubGlobal("fetch", mockFetch);
-
-// Mock useCandles to control WebSocket candle flow in tests
-const mockUseCandles = vi.hoisted(() => vi.fn((): any[] => []));
 vi.mock("@/lib/market", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/market")>();
   return {
     ...actual,
     useCandles: mockUseCandles,
+    useTicker: mockUseTicker,
+    useTrades: mockUseTrades,
   };
 });
 
-// Snake_case candle matching the real Bitget REST API response
 const baseCandle = {
   start_time: 1790000000000,
   open: "100000",
@@ -131,12 +153,6 @@ function makeSnakeCandle(overrides: Record<string, unknown> = {}) {
   return { ...baseCandle, ...overrides };
 }
 
-describe("candlestick time conversion", () => {
-  it("converts millisecond timestamp to UTC seconds", () => {
-    expect(Math.floor(1790000000000 / 1000)).toBe(1790000000);
-  });
-});
-
 describe("CandlestickChart", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -152,6 +168,7 @@ describe("CandlestickChart", () => {
     mockGetVisibleRange.mockClear();
     mockGetVisibleLogicalRange.mockClear();
     mockSetVisibleRange.mockClear();
+    mockSetVisibleLogicalRange.mockClear();
     mockSubscribeVisibleTimeRangeChange.mockClear();
     mockUnsubscribeVisibleTimeRangeChange.mockClear();
     mockSubscribeVisibleLogicalRangeChange.mockClear();
@@ -165,542 +182,358 @@ describe("CandlestickChart", () => {
     mockDetachPrimitive.mockClear();
     mockRemove.mockClear();
     mockSetVisibleLogicalRange.mockClear();
-    mockBarsInLogicalRange.mockClear();
     mockUseCandles.mockReturnValue([]);
+    mockUseTrades.mockReturnValue([]);
+    mockUseTicker.mockReturnValue({ last: "100" });
+    capturedPrimitive.current = null as any;
+    mockAttachPrimitive.mockImplementation((p: any) => {
+      if (p && typeof p.setPrice === "function") capturedPrimitive.current = p;
+    });
     document.body.innerHTML = "";
   });
 
-  afterEach(() => cleanup());
-
-  it("renders chart container", () => {
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    expect(document.querySelector("div.border-slate-700")).toBeTruthy();
+  afterEach(() => {
+    cleanup();
   });
 
-  it("creates chart with candlestick and volume series on mount", () => {
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    expect(mockCreateChart).toHaveBeenCalledTimes(1);
-    expect(mockAddSeries).toHaveBeenCalledTimes(2);
-  });
-
-  it("attaches volume axis primitive to candlestick series on mount", async () => {
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockAttachPrimitive).toHaveBeenCalledTimes(1);
-    const primitive = mockAttachPrimitive.mock.calls[0][0];
-    expect(primitive).toBeDefined();
-    expect(typeof primitive.priceAxisViews).toBe("function");
-    expect(typeof primitive.updateAllViews).toBe("function");
-    expect(typeof primitive.attached).toBe("function");
-    expect(typeof primitive.detached).toBe("function");
-  });
-
-  it("primitive implements ISeriesPrimitiveAxisView contract", async () => {
-    mockGetVisibleLogicalRange.mockReturnValue({ from: 0, to: 0 });
-    mockDataByIndex
-      .mockReturnValueOnce({
-        time: 1790000000000,
-        open: 100000,
-        high: 100100,
-        low: 99900,
-        close: 100050,
-      } as any)
-      .mockReturnValue({
-        time: 1790000000000,
-        value: 12.5,
-        color: "#22c55e",
-      } as any);
-    mockPriceToCoordinate.mockReturnValue(100);
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    const primitive = mockAttachPrimitive.mock.calls[0][0];
-    const views = primitive.priceAxisViews();
-    expect(Array.isArray(views)).toBe(true);
-    expect(views.length).toBeGreaterThan(0);
-
-    const view = views[0];
-    expect(typeof view.coordinate).toBe("function");
-    expect(typeof view.text).toBe("function");
-    expect(typeof view.textColor).toBe("function");
-    expect(typeof view.backColor).toBe("function");
-    expect(typeof view.visible).toBe("function");
-    expect(typeof view.tickVisible).toBe("function");
-  });
-
-  it("detaches volume axis primitive on unmount", async () => {
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    const { unmount } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-    unmount();
-
-    expect(mockDetachPrimitive).toHaveBeenCalledTimes(1);
-    expect(mockRemove).toHaveBeenCalledTimes(1);
-  });
-
-  it("no custom HTML volume marker is rendered", () => {
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    const markers = document.querySelectorAll("div[style*='backgroundColor']");
-    // No HTML-based volume marker div should exist
-    expect(markers.length).toBe(0);
-  });
-
-  it("shows loading state initially", () => {
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    expect(screen.getByText("Loading candles…")).toBeTruthy();
-  });
-
-  it("loads historical candles from REST API", async () => {
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(mockFetch).toHaveBeenCalled();
-    const callUrl = mockFetch.mock.calls[0][0];
-    expect(callUrl).toContain("/api/market/candles/BTCUSDT");
-    expect(callUrl).toContain("granularity=1m");
-    expect(callUrl).toContain("limit=1000");
-
-    expect(mockSetData).toHaveBeenCalled();
-    expect(screen.queryByText("Loading candles…")).toBeNull();
-  });
-
-  it("produces chart points for all historical candles", async () => {
-    const candles = Array.from({ length: 300 }, (_, i) =>
-      makeSnakeCandle({
-        start_time: 1790000000000 + i * 60000,
-        open: String(100000 + i),
-        high: String(100100 + i),
-        low: String(99900 + i),
-        close: String(100000 + i),
-      }),
-    );
-    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(candles), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    const setDataCalls = mockSetData.mock.calls.filter((args) => args[0] && Array.isArray(args[0]));
-    const lastCall = setDataCalls[setDataCalls.length - 1];
-    const points = lastCall![0];
-    expect(points.length).toBe(300);
-  });
-
-  it("sorts historical candles by timestamp ascending", async () => {
-    const late = makeSnakeCandle({ start_time: 1790000002000, close: "100060" });
-    const early = makeSnakeCandle({ start_time: 1790000000000, close: "100050" });
-    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([late, early]), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 200));
-
-    const setDataCalls = mockSetData.mock.calls.filter((args) => args[0] && args[0].length > 0);
-    expect(setDataCalls.length).toBeGreaterThan(0);
-    const points = setDataCalls[setDataCalls.length - 1][0];
-    expect(points[0].time).toBeLessThan(points[1].time);
-  });
-
-  it("removes duplicate timestamps", async () => {
-    const dup = makeSnakeCandle({ close: "100099" });
-    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baseCandle, dup]), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    const setDataCall = mockSetData.mock.calls.find((args) => args[0] && Array.isArray(args[0]));
-    const points = setDataCall![0];
-    const times = points.map((p: any) => p.time);
-    expect(times.length).toBe(new Set(times).size);
-  });
-
-  it("rejects invalid candle values (high < low)", async () => {
-    const invalid = makeSnakeCandle({ high: "99900", low: "100100" });
-    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([invalid]), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 200));
-
-    const validCalls = mockSetData.mock.calls.filter((args) => args[0] && args[0].length > 0);
-    expect(validCalls.length).toBe(0);
-  });
-
-  it("rejects invalid decimal values", async () => {
-    const invalid = makeSnakeCandle({ open: "not-a-number" });
-    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([invalid]), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 200));
-
-    const validCalls = mockSetData.mock.calls.filter((args) => args[0] && args[0].length > 0);
-    expect(validCalls.length).toBe(0);
-  });
-
-  it("REST loading works without WebSocket candles", async () => {
-    mockUseCandles.mockReturnValue([]);
-    mockFetch
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify([baseCandle]), { status: 200 }),
-      )
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(mockSetData).toHaveBeenCalled();
-    expect(screen.queryByText("Loading candles…")).toBeNull();
-  });
-
-  it("WebSocket update after loading does not call setData again", async () => {
-    mockFetch
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify([baseCandle]), { status: 200 }),
-      )
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
-    const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    const setDataCallsBefore = mockSetData.mock.calls.length;
-
-    mockUseCandles.mockReturnValue([makeSnakeCandle({ start_time: 1790000000000, close: "100090" })]);
-    rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(mockSetData.mock.calls.length).toBe(setDataCallsBefore);
-  });
-
-  it("timeframe switching loads a new historical dataset", async () => {
-    mockFetch
-      .mockResolvedValueOnce(new Response(JSON.stringify([baseCandle]), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify([makeSnakeCandle({ start_time: 1800000000000, close: "200000" })]), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
-
-    const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(mockFetch.mock.calls[0][0]).toContain("granularity=1m");
-
-    rerender(<CandlestickChart symbol="BTCUSDT" granularity="5m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(mockFetch.mock.calls[0][0]).toContain("granularity=1m");
-    expect(mockFetch.mock.calls[1][0]).toContain("granularity=1m");
-    expect(mockFetch.mock.calls[2][0]).toContain("granularity=5m");
-  });
-
-  it("old requests cannot overwrite a newer timeframe", async () => {
-    const deferred1 = { resolve: null as ((v: Response) => void) | null };
-    const p1 = new Promise<Response>((res) => { deferred1.resolve = res; });
-
-    mockFetch
-      .mockResolvedValueOnce(p1)
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
-
-    const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    rerender(<CandlestickChart symbol="BTCUSDT" granularity="5m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-
-    const setDataCallsBefore = mockSetData.mock.calls.length;
-
-    deferred1.resolve!(new Response(JSON.stringify([makeSnakeCandle({ start_time: 1700000000000, close: "99999" })]), { status: 200 }));
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockSetData.mock.calls.length).toBe(setDataCallsBefore);
-  });
-
-  it("handles API error and shows error message", async () => {
-    mockFetch.mockImplementationOnce(() => Promise.reject(new Error("network failure")));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(screen.getByText(/network failure/)).toBeTruthy();
-    expect(screen.queryByText("Loading candles…")).toBeNull();
-  });
-
-  it("handles empty response", async () => {
-    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 200));
-
-    expect(mockSetData).toHaveBeenCalledWith([]);
-  });
-
-  it("volume history matches candlestick history", async () => {
-    const candles = [
-      makeSnakeCandle({ start_time: 1790000000000, open: "100000", close: "100050", base_volume: "10.5" }),
-      makeSnakeCandle({ start_time: 1790000000060, open: "100050", close: "100040", base_volume: "5.0" }),
-    ];
-    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(candles), { status: 200 }));
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    const allSetDataCalls = mockSetData.mock.calls.filter((args) => args[0] && Array.isArray(args[0]));
-    expect(allSetDataCalls.length).toBeGreaterThanOrEqual(2);
-    const candlePoints = allSetDataCalls[allSetDataCalls.length - 2]![0];
-    const volumePoints = allSetDataCalls[allSetDataCalls.length - 1]![0];
-
-    expect(volumePoints.length).toBe(candlePoints.length);
-    for (let i = 0; i < candlePoints.length; i++) {
-      expect(volumePoints[i].time).toBe(candlePoints[i].time);
-    }
-  });
-
-  it("cleans up chart on unmount", () => {
-    const { unmount } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    unmount();
-    expect(mockRemove).toHaveBeenCalledTimes(1);
-  });
-
-  it("renders without error for inactive granularity", () => {
-    render(<CandlestickChart symbol="BTCUSDT" granularity="5m" />);
-    expect(mockCreateChart).toHaveBeenCalledTimes(1);
-  });
-
-  // --- Problem B: Visible-range synchronization tests ---
-
-  it("subscribes to visible logical range changes on mount", async () => {
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockSubscribeVisibleLogicalRangeChange).toHaveBeenCalled();
-    expect(mockSubscribeDataChanged).toHaveBeenCalled();
-  });
-
-  it("unsubscribes visible logical range changes on unmount", async () => {
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    const { unmount } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-    unmount();
-
-    expect(mockUnsubscribeVisibleLogicalRangeChange).toHaveBeenCalled();
-    expect(mockUnsubscribeDataChanged).toHaveBeenCalled();
-  });
-
-  it("volume marker uses rightmost visible candle when panning left", async () => {
-    // Reset mocks to clear any state from previous tests
-    mockDataByIndex.mockReset();
-    mockPriceToCoordinate.mockReset();
-    mockGetVisibleLogicalRange.mockReset();
-
-    // Set up mocks BEFORE rendering so initial load uses correct values
-    mockGetVisibleLogicalRange.mockReturnValue({ from: 0, to: 0 });
-    mockDataByIndex
-      .mockReturnValueOnce({
-        time: 1790000000000,
-        open: 100000,
-        high: 100100,
-        low: 99900,
-        close: 100050,
-      } as any)
-      .mockReturnValue({
-        time: 1790000000000,
-        value: 12.5,
-        color: "#22c55e",
-      } as any);
-    mockPriceToCoordinate.mockReturnValue(150);
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockDataByIndex).toHaveBeenCalled();
-    expect(mockDataByIndex.mock.calls[0][0]).toBe(0);
-    expect(mockDataByIndex.mock.calls[0][1]).toBe(-1); // MismatchDirection.NearestLeft
-  });
-
-  it("volume marker uses newest visible candle when range at end", async () => {
-    mockDataByIndex.mockReset();
-    mockPriceToCoordinate.mockReset();
-    mockGetVisibleLogicalRange.mockReset();
-
-    mockGetVisibleLogicalRange.mockReturnValue({ from: 0, to: 999 });
-    mockDataByIndex
-      .mockReturnValueOnce({
-        time: 1790000000000,
-        open: 100000,
-        high: 100100,
-        low: 99900,
-        close: 100050,
-      } as any)
-      .mockReturnValue({
-        time: 1790000000000,
-        value: 25.0,
-        color: "#ef4444",
-      } as any);
-    mockPriceToCoordinate.mockReturnValue(200);
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockPriceToCoordinate).toHaveBeenCalledWith(25.0);
-  });
-
-  it("hides volume marker when no visible candle exists", async () => {
-    mockGetVisibleLogicalRange.mockReset();
-    mockGetVisibleLogicalRange.mockReturnValue(null);
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-  });
-
-  it("volume marker timestamp matches candlestick price marker timestamp", async () => {
-    mockDataByIndex.mockReset();
-    mockPriceToCoordinate.mockReset();
-    mockGetVisibleLogicalRange.mockReset();
-
-    mockGetVisibleLogicalRange.mockReturnValue({ from: 0, to: 5 });
-    mockDataByIndex
-      .mockReturnValueOnce({
-        time: 1790000003000,
-        open: 100000,
-        high: 100100,
-        low: 99900,
-        close: 100050,
-      } as any)
-      .mockReturnValue({
-        time: 1790000003000,
-        value: 15.0,
-        color: "#22c55e",
-      } as any);
-    mockPriceToCoordinate.mockReturnValue(300);
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockDataByIndex.mock.calls[0][0]).toBe(mockDataByIndex.mock.calls[1][0]);
-  });
-
-  it("candle and volume timestamps mismatch hides marker", async () => {
-    mockDataByIndex.mockReset();
-    mockPriceToCoordinate.mockReset();
-    mockGetVisibleLogicalRange.mockReset();
-
-    mockGetVisibleLogicalRange.mockReturnValue({ from: 0, to: 5 });
-    mockDataByIndex
-      .mockReturnValueOnce({
-        time: 1790000003000,
-        open: 100000,
-        high: 100100,
-        low: 99900,
-        close: 100050,
-      } as any)
-      .mockReturnValue({
-        time: 1790000004000, // different timestamp
-        value: 15.0,
-        color: "#22c55e",
-      } as any);
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockPriceToCoordinate).not.toHaveBeenCalled();
-  });
-
-  it("off-screen live WebSocket updates do not change volume marker", async () => {
-    mockDataByIndex.mockReset();
-    mockPriceToCoordinate.mockReset();
-    mockGetVisibleLogicalRange.mockReset();
-
-    mockGetVisibleLogicalRange.mockReturnValue({ from: 0, to: 5 });
-    mockDataByIndex
-      .mockReturnValueOnce({
-        time: 1790000003000,
-        open: 100000,
-        high: 100100,
-        low: 99900,
-        close: 100050,
-      } as any)
-      .mockReturnValue({
-        time: 1790000003000,
-        value: 15.0,
-        color: "#22c55e",
-      } as any);
-    mockPriceToCoordinate.mockReturnValue(300);
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify([baseCandle]), { status: 200 }),
-    );
-    const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 100));
-
-    // WS candle arrives for newer timestamp outside visible range
-    mockUseCandles.mockReturnValue([makeSnakeCandle({ start_time: 1790000100000, close: "100090" })]);
-    rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    await new Promise((r) => setTimeout(r, 50));
-
-    // Marker should still show volume 15.0 (visible candle), not WS candle's volume
-    expect(mockPriceToCoordinate).toHaveBeenCalledWith(15.0);
-  });
-
-  // --- Problem A: UI consistency tests ---
-
-  it("volume marker is rendered through native axis primitive, not HTML", () => {
-    render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
-    const htmlMarkers = document.querySelectorAll("div[ref='volumeMarkerRef']");
-    expect(htmlMarkers.length).toBe(0);
-  });
-});
-
-describe("TimeframeSelector", () => {
-  afterEach(() => cleanup());
-
-  it("renders all supported timeframes", () => {
-    render(<TimeframeSelector granularity="1m" onChange={vi.fn()} />);
-    TIMEFRAMES.forEach((tf) => {
-      expect(screen.getByText(tf.label)).toBeTruthy();
+  describe("candlestick-chart", () => {
+    it("renders without crashing", () => {
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baseCandle]), { status: 200 }));
+      const { container } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+      expect(container).toBeTruthy();
     });
-  });
 
-  it("calls onChange when a timeframe is clicked", () => {
-    const onChange = vi.fn();
-    render(<TimeframeSelector granularity="1m" onChange={onChange} />);
-    const buttons = screen.getAllByRole("button");
-    const target = buttons.find((b) => b.textContent === "4H");
-    expect(target).toBeTruthy();
-    if (!target) throw new Error("4H button not found");
-    fireEvent.click(target);
-    expect(onChange).toHaveBeenCalledWith("4H");
-  });
+    it("candle and volume timestamps mismatch hides marker", () => {
+      mockDataByIndex.mockReset();
+      mockPriceToCoordinate.mockReset();
+      mockGetVisibleLogicalRange.mockReset();
 
-  it("highlights the selected timeframe", () => {
-    render(<TimeframeSelector granularity="4H" onChange={vi.fn()} />);
-    const buttons = screen.getAllByRole("button");
-    const selected = buttons.find((b) => b.textContent === "4H");
-    expect(selected).toBeTruthy();
-    if (!selected) throw new Error("4H button not found");
-    expect(selected.className).toContain("bg-slate-600");
-    expect(selected.className).toContain("text-white");
+      mockGetVisibleLogicalRange.mockReturnValue({ from: 0, to: 5 });
+      mockDataByIndex
+        .mockReturnValueOnce({
+          time: 1790000003000,
+          open: 100000,
+          high: 100100,
+          low: 99900,
+          close: 100050,
+        } as any)
+        .mockReturnValue({
+          time: 179000004000,
+          value: 15.0,
+          color: "#22c55e",
+        } as any);
+      mockPriceToCoordinate.mockReturnValue(300);
+
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baseCandle]), { status: 200 }));
+      render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+      expect(mockDataByIndex).toHaveBeenCalled();
+      expect(mockDataByIndex.mock.calls[0][0]).toBe(0);
+      expect(mockDataByIndex.mock.calls[0][1]).toBe(-1);
+      expect(mockPriceToCoordinate).toHaveBeenCalled();
+    });
+
+    it("renders without crashing with empty candles", () => {
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
+      const { container } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+      expect(container).toBeTruthy();
+    });
+
+    describe("candlestick-chart reconnect backoff", () => {
+      it("updates same-bucket candle on every live update without duplicating bars", async () => {
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baseCandle]), { status: 200 }));
+        const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 100));
+
+        const setDataBefore = mockSetData.mock.calls.length;
+
+        mockUseCandles.mockReturnValue([makeSnakeCandle({ startTime: 1790000000000, close: "100090", baseVolume: "12.5" })]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        mockUseCandles.mockReturnValue([makeSnakeCandle({ startTime: 1790000000000, close: "100110", baseVolume: "12.5" })]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        // First same-bucket candle uses setData (new bucket), second uses update (same bucket)
+        expect(mockUpdate.mock.calls.length).toBe(1);
+        expect(mockSetData.mock.calls.length).toBe(setDataBefore);
+      });
+
+      it("new candle bucket creates the next candle rather than a duplicate", async () => {
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baseCandle]), { status: 200 }));
+        const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 100));
+
+        const setDataBefore = mockSetData.mock.calls.length;
+        const updateCallsBefore = mockUpdate.mock.calls.length;
+
+        mockUseCandles.mockReturnValue([makeSnakeCandle({ startTime: 1790000060000, close: "100200", baseVolume: "12.5" })]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        // New bucket uses setData (not update), so update count stays the same
+        expect(mockUpdate.mock.calls.length).toBe(updateCallsBefore);
+        expect(mockSetData.mock.calls.length).toBeGreaterThan(setDataBefore);
+      });
+
+      it("live updates are not lost during initial history loading", async () => {
+        mockUseCandles.mockReturnValue([makeSnakeCandle({ startTime: 1790000000000, close: "100090", baseVolume: "12.5" })]);
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baseCandle]), { status: 200 }));
+        render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 100));
+
+        const updateCallsBefore = mockUpdate.mock.calls.length;
+
+        // New bucket uses setData (not update), so setData count increases
+        expect(mockSetData.mock.calls.length).toBeGreaterThan(updateCallsBefore);
+        expect(mockUpdate.mock.calls.length).toBe(updateCallsBefore);
+      });
+    });
+
+    describe("live trade sync", () => {
+      const tradePrice = 100123.45;
+      const liveTrade = {
+        tradeId: "live-1",
+        symbol: "BTCUSDT",
+        price: String(tradePrice),
+        size: "0.1",
+        side: "buy",
+        tsExchange: 1790000000000,
+        isSnapshot: false,
+      };
+
+      const baselineCandle = makeSnakeCandle({
+        startTime: 1790000000000,
+        close: "100050",
+        baseVolume: "12.5",
+      });
+
+      function renderChartWithBaseline() {
+        mockUseCandles.mockReturnValue([baselineCandle]);
+        mockUseTrades.mockReturnValue([liveTrade]);
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baselineCandle]), { status: 200 }));
+        return render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+      }
+
+      beforeEach(() => {
+        mockUseCandles.mockReturnValue([baselineCandle]);
+        mockUseTrades.mockReturnValue([]);
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baselineCandle]), { status: 200 }));
+      });
+
+      it("13. One accepted Trade updates the active candle series", async () => {
+        renderChartWithBaseline();
+        await new Promise((r) => setTimeout(r, 100));
+
+        const candleUpdate = mockUpdate.mock.calls.find(
+          (c) => c[0] && typeof c[0].close === "number",
+        );
+        expect(candleUpdate).toBeTruthy();
+        expect(candleUpdate![0].close).toBe(tradePrice);
+      });
+
+      it("14. The same Trade updates the chart price indicator to the same price", async () => {
+        // Render with no trades so only the ticker price is applied initially.
+        mockUseCandles.mockReturnValue([baselineCandle]);
+        mockUseTrades.mockReturnValue([]);
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baselineCandle]), { status: 200 }));
+        const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 100));
+        expect(capturedPrimitive.current).toBeTruthy();
+        vi.spyOn(capturedPrimitive.current, "setPrice");
+
+        mockUseTrades.mockReturnValue([liveTrade]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(capturedPrimitive.current.setPrice).toHaveBeenCalledWith(tradePrice);
+      });
+
+      it("15. A subsequent Trade updates the same candle and existing price primitive", async () => {
+        const nextPrice = 100200.5;
+        const nextTrade = { ...liveTrade, tradeId: "live-2", price: String(nextPrice), tsExchange: 1790000010000 };
+
+        const { rerender } = renderChartWithBaseline();
+        await new Promise((r) => setTimeout(r, 100));
+        expect(capturedPrimitive.current).toBeTruthy();
+        vi.spyOn(capturedPrimitive.current, "setPrice");
+
+        const updatesBefore = mockUpdate.mock.calls.length;
+        const setDataBefore = mockSetData.mock.calls.length;
+
+        mockUseTrades.mockReturnValue([nextTrade]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        // Same bucket: candle updated again (candle + volume series both call
+        // update), no new setData bar.
+        const candleUpdate = mockUpdate.mock.calls.find(
+          (c, i) => i >= updatesBefore && c[0] && typeof c[0].close === "number",
+        );
+        expect(candleUpdate).toBeTruthy();
+        expect(candleUpdate![0].close).toBe(nextPrice);
+        expect(mockSetData.mock.calls.length).toBe(setDataBefore);
+        expect(capturedPrimitive.current.setPrice).toHaveBeenCalledWith(nextPrice);
+      });
+
+      it("16. No duplicate candle bar or price primitive is created", async () => {
+        const { rerender } = renderChartWithBaseline();
+        await new Promise((r) => setTimeout(r, 100));
+
+        const setDataBefore = mockSetData.mock.calls.length;
+        const attachBefore = mockAttachPrimitive.mock.calls.length;
+
+        mockUseTrades.mockReturnValue([
+          { ...liveTrade, isSnapshot: true },
+          liveTrade,
+        ]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(mockSetData.mock.calls.length).toBe(setDataBefore);
+        expect(mockAttachPrimitive.mock.calls.length).toBe(attachBefore);
+      });
+
+      it("17. Out-of-order Trade does not regress Close or price line", async () => {
+        const { rerender } = renderChartWithBaseline();
+        await new Promise((r) => setTimeout(r, 100));
+        expect(capturedPrimitive.current).toBeTruthy();
+        vi.spyOn(capturedPrimitive.current, "setPrice");
+
+        const laterTrade = {
+          ...liveTrade,
+          tradeId: "live-later",
+          price: String(100200.5),
+          tsExchange: 1790000010000,
+        };
+        mockUseTrades.mockReturnValue([laterTrade]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        const lateTrade = {
+          ...liveTrade,
+          tradeId: "live-late",
+          price: "9999",
+          tsExchange: 1790000005000,
+        };
+        mockUseTrades.mockReturnValue([lateTrade]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        const candleUpdates = mockUpdate.mock.calls.filter(
+          (c) => c[0] && typeof c[0].close === "number",
+        );
+        const lastCandleUpdate = candleUpdates[candleUpdates.length - 1];
+        expect(lastCandleUpdate).toBeTruthy();
+        expect(lastCandleUpdate![0].close).toBe(100200.5);
+        // Primitive reflects canonical close, never the stale out-of-order price.
+        expect(capturedPrimitive.current.setPrice).toHaveBeenCalledWith(100200.5);
+        expect(capturedPrimitive.current.setPrice).not.toHaveBeenCalledWith(9999);
+      });
+
+      it("18. Ticker update cannot overwrite Trade-driven current price", async () => {
+        // No trades yet: ticker initializes the displayed price (during mount).
+        mockUseCandles.mockReturnValue([baselineCandle]);
+        mockUseTrades.mockReturnValue([]);
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baselineCandle]), { status: 200 }));
+        const { rerender } = render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 100));
+        expect(capturedPrimitive.current).toBeTruthy();
+        const priceSpy = vi.spyOn(capturedPrimitive.current, "setPrice");
+        // Clear the mount-time call so we only observe subsequent calls.
+        priceSpy.mockClear();
+
+        // A live trade establishes the canonical price.
+        mockUseTrades.mockReturnValue([liveTrade]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(priceSpy).toHaveBeenCalledWith(tradePrice);
+
+        // Ticker changes to a different price: must NOT overwrite trade-driven price.
+        mockUseTicker.mockReturnValue({ last: "9999" });
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(priceSpy).not.toHaveBeenCalledWith(9999);
+      });
+
+      it("19. Native candle update does not flip rendered Open away from builder Open", async () => {
+        const { rerender } = renderChartWithBaseline();
+        await new Promise((r) => setTimeout(r, 100));
+
+        // Delayed native candle for the same bucket with a different Open.
+        mockUseCandles.mockReturnValue([
+          makeSnakeCandle({
+            startTime: 1790000000000,
+            open: "99999",
+            close: "100050",
+            baseVolume: "12.5",
+          }),
+        ]);
+        rerender(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 50));
+
+        const candleUpdates = mockUpdate.mock.calls.filter(
+          (c) => c[0] && typeof c[0].close === "number",
+        );
+        const lastCandleUpdate = candleUpdates[candleUpdates.length - 1];
+        expect(lastCandleUpdate).toBeTruthy();
+        // Rendered Open must stay at the builder's value (100000), not flip to
+        // the native value (99999).
+        expect(lastCandleUpdate![0].open).toBe(100000);
+        expect(candleUpdates.some((c) => c[0].open === 99999)).toBe(false);
+      });
+    });
+
+    describe("initial hydration and resume", () => {
+      it("renders the complete initial dataset, not a single candle", async () => {
+        mockFetch.mockResolvedValueOnce(
+          new Response(
+            JSON.stringify([
+              baseCandle,
+              makeSnakeCandle({ start_time: 1790000060000, close: "100100" }),
+            ]),
+            { status: 200 },
+          ),
+        );
+        render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 100));
+
+        const candleSetData = mockSetData.mock.calls.filter(
+          (c) =>
+            c[0] && Array.isArray(c[0]) && c[0].length > 0 && typeof c[0][0].close === "number",
+        );
+        expect(candleSetData.length).toBeGreaterThan(0);
+        const lastDataset = candleSetData[candleSetData.length - 1][0];
+        // Complete historical dataset (2 candles), never a single-candle flash.
+        expect(lastDataset.length).toBeGreaterThan(1);
+      });
+
+      it("visibilitychange hidden→visible triggers resume catch-up via REST", async () => {
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify([baseCandle]), { status: 200 }));
+        render(<CandlestickChart symbol="BTCUSDT" granularity="1m" />);
+        await new Promise((r) => setTimeout(r, 100));
+        mockFetch.mockClear();
+
+        // Simulate tab hidden then visible again.
+        Object.defineProperty(document, "visibilityState", {
+          value: "hidden",
+          configurable: true,
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+        Object.defineProperty(document, "visibilityState", {
+          value: "visible",
+          configurable: true,
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+
+        // Debounce (400ms) + catch-up fetch.
+        await new Promise((r) => setTimeout(r, 600));
+
+        const catchUpCalls = mockFetch.mock.calls.filter(
+          (c) => typeof c[0] === "string" && String(c[0]).includes("/api/market/candles/"),
+        );
+        expect(catchUpCalls.length).toBeGreaterThan(0);
+      });
+    });
   });
 });

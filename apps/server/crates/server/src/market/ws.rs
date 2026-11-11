@@ -67,6 +67,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 Ok(ticker) = broadcast_rx.recv() => {
                     let msg = serde_json::json!({
                         "type": "ticker",
+                        "isSnapshot": false,
                         "data": {
                             "symbol": ticker.symbol,
                             "last": ticker.last.to_string(),
@@ -88,6 +89,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 Ok(book) = broadcast_ob_rx.recv() => {
                     let msg = serde_json::json!({
                         "type": "orderbook",
+                        "isSnapshot": false,
                         "data": {
                             "symbol": book.symbol,
                             "bids": book.bids.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),
@@ -103,6 +105,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 Ok(trade) = broadcast_trades_rx.recv() => {
                     let msg = serde_json::json!({
                         "type": "trade",
+                        "isSnapshot": false,
                         "data": {
                             "tradeId": trade.trade_id,
                             "symbol": trade.symbol,
@@ -149,14 +152,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // initial snapshot
     if let Some(t) = engine.latest_ticker("BTCUSDT").await {
         if t.ts_received > last_sent.load(Ordering::SeqCst) {
-            let msg = serde_json::json!({"type":"snapshot","data":{"symbol":t.symbol,"last":t.last.to_string(),"bid":t.bid.map(|d|d.to_string()),"ask":t.ask.map(|d|d.to_string()),"markPrice":t.mark_price.map(|d|d.to_string()),"indexPrice":t.index_price.map(|d|d.to_string()),"high24h":t.high_24h.map(|d|d.to_string()),"low24h":t.low_24h.map(|d|d.to_string()),"change24h":t.change_24h.map(|d|d.to_string()),"fundingRate":t.funding_rate.map(|d|d.to_string()),"tsExchange":t.ts_exchange,"tsReceived":t.ts_received}});
+            let msg = serde_json::json!({"type":"snapshot","isSnapshot":true,"data":{"symbol":t.symbol,"last":t.last.to_string(),"bid":t.bid.map(|d|d.to_string()),"ask":t.ask.map(|d|d.to_string()),"markPrice":t.mark_price.map(|d|d.to_string()),"indexPrice":t.index_price.map(|d|d.to_string()),"high24h":t.high_24h.map(|d|d.to_string()),"low24h":t.low_24h.map(|d|d.to_string()),"change24h":t.change_24h.map(|d|d.to_string()),"fundingRate":t.funding_rate.map(|d|d.to_string()),"tsExchange":t.ts_exchange,"tsReceived":t.ts_received}});
             let _ = tx.send(Message::Text(msg.to_string().into())).await;
             last_sent.store(t.ts_received, Ordering::SeqCst);
         }
     }
     // initial order book snapshot
     if let Some(b) = engine.latest_orderbook("BTCUSDT").await {
-        let msg = serde_json::json!({"type":"orderbook","data":{"symbol":b.symbol,"bids":b.bids.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"asks":b.asks.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"tsExchange":b.ts_exchange,"tsReceived":b.ts_received,"seq":b.seq,"source":b.source}});
+        let msg = serde_json::json!({"type":"orderbook","isSnapshot":true,"data":{"symbol":b.symbol,"bids":b.bids.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"asks":b.asks.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"tsExchange":b.ts_exchange,"tsReceived":b.ts_received,"seq":b.seq,"source":b.source}});
         let _ = tx.send(Message::Text(msg.to_string().into())).await;
     }
     // initial recent trades snapshot
@@ -181,7 +184,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             })
             .collect();
         let msg =
-            serde_json::json!({"type":"trades","data":{"symbol":"BTCUSDT","trades":trades_json}});
+            serde_json::json!({"type":"trades","isSnapshot":true,"data":{"symbol":"BTCUSDT","trades":trades_json}});
         let _ = tx.send(Message::Text(msg.to_string().into())).await;
     }
     while let Some(Ok(msg)) = stream.next().await {
@@ -190,11 +193,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 if cm.op == "subscribe" {
                     let symbol = cm.symbol.clone().unwrap_or_else(|| "BTCUSDT".to_string());
                     if let Some(t) = engine.latest_ticker(&symbol).await {
-                        let msg = serde_json::json!({"type":"snapshot","data":{"symbol":t.symbol,"last":t.last.to_string(),"bid":t.bid.map(|d|d.to_string()),"ask":t.ask.map(|d|d.to_string()),"markPrice":t.mark_price.map(|d|d.to_string()),"indexPrice":t.index_price.map(|d|d.to_string()),"high24h":t.high_24h.map(|d|d.to_string()),"low24h":t.low_24h.map(|d|d.to_string()),"change24h":t.change_24h.map(|d|d.to_string()),"fundingRate":t.funding_rate.map(|d|d.to_string()),"tsExchange":t.ts_exchange,"tsReceived":t.ts_received}});
+            let msg = serde_json::json!({"type":"snapshot","isSnapshot":true,"data":{"symbol":t.symbol,"last":t.last.to_string(),"bid":t.bid.map(|d|d.to_string()),"ask":t.ask.map(|d|d.to_string()),"markPrice":t.mark_price.map(|d|d.to_string()),"indexPrice":t.index_price.map(|d|d.to_string()),"high24h":t.high_24h.map(|d|d.to_string()),"low24h":t.low_24h.map(|d|d.to_string()),"change24h":t.change_24h.map(|d|d.to_string()),"fundingRate":t.funding_rate.map(|d|d.to_string()),"tsExchange":t.ts_exchange,"tsReceived":t.ts_received}});
                         let _ = tx.send(Message::Text(msg.to_string().into())).await;
                     }
                     if let Some(b) = engine.latest_orderbook(&symbol).await {
-                        let msg = serde_json::json!({"type":"orderbook","data":{"symbol":b.symbol,"bids":b.bids.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"asks":b.asks.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"tsExchange":b.ts_exchange,"tsReceived":b.ts_received,"seq":b.seq,"source":b.source}});
+                        let msg = serde_json::json!({"type":"orderbook","isSnapshot":true,"data":{"symbol":b.symbol,"bids":b.bids.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"asks":b.asks.iter().map(|l| serde_json::json!({"price":l.price.to_string(),"quantity":l.quantity.to_string()})).collect::<Vec<_>>(),"tsExchange":b.ts_exchange,"tsReceived":b.ts_received,"seq":b.seq,"source":b.source}});
                         let _ = tx.send(Message::Text(msg.to_string().into())).await;
                     }
                     let cached_trades = engine.latest_trades(&symbol).await;
@@ -217,7 +220,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 })
                             })
                             .collect();
-                        let msg = serde_json::json!({"type":"trades","data":{"symbol":symbol,"trades":trades_json}});
+                        let msg = serde_json::json!({"type":"trades","isSnapshot":true,"data":{"symbol":symbol,"trades":trades_json}});
                         let _ = tx.send(Message::Text(msg.to_string().into())).await;
                     }
                     let ack = serde_json::json!({"type":"subscribed","data":{"symbol":symbol}});
