@@ -13,10 +13,14 @@
 --        (gtc / ioc / fok / post_only).
 --   7. Makes exchange status nullable (order may be persisted before exchange
 --        confirmation).
-+
--- Step 1: Drop the old margin_mode constraint
+--
+-- Step 1: Drop old constraints from v6
 ALTER TABLE orders
     DROP CONSTRAINT IF EXISTS orders_margin_mode_valid;
+ALTER TABLE orders
+    DROP CONSTRAINT IF EXISTS orders_time_in_force_valid;
+ALTER TABLE orders
+    DROP CONSTRAINT IF EXISTS orders_client_oid_nonempty;
 
 -- Step 2: Rename margin_mode -> position_mode
 ALTER TABLE orders
@@ -59,6 +63,10 @@ ALTER TABLE orders
 
 -- Step 7: Correct time_in_force values to Bitget force parameter (lowercase)
 -- Existing v6 values were uppercase (GTC/IOC/FOK/PO); convert to lowercase.
+-- First drop the old constraint from v6, then re-add with correct values.
+ALTER TABLE orders
+    DROP CONSTRAINT IF EXISTS orders_time_in_force_valid;
+
 UPDATE orders
     SET time_in_force = 'gtc'
     WHERE time_in_force = 'GTC';
@@ -94,8 +102,9 @@ ALTER TABLE orders
     ALTER COLUMN status DROP NOT NULL;
 
 -- Step 10: Add order_type and price/time_in_force consistency constraints
+-- order_type already exists from v5; add it only if missing.
 ALTER TABLE orders
-    ADD COLUMN order_type TEXT NOT NULL DEFAULT 'limit',
+    ADD COLUMN IF NOT EXISTS order_type TEXT NOT NULL DEFAULT 'limit',
     ADD CONSTRAINT orders_order_type_valid CHECK (order_type IN ('limit', 'market')),
     ADD CONSTRAINT orders_price_time_in_force_valid CHECK (
         (order_type = 'limit' AND price IS NOT NULL AND time_in_force IS NOT NULL)
