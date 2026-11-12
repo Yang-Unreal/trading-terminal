@@ -3,16 +3,16 @@
 -- Corrects Bitget Classic V2 field semantics introduced in migration 0006:
 --
 --   1. Renames margin_mode -> position_mode with corrected values
-+        (one_way -> one_way_mode, hedged -> hedge_mode), representing the
-+        account-level position mode, NOT Bitget's marginMode parameter.
-+   2. Adds margin_mode column (isolated / crossed) for Bitget's marginMode.
-+   3. Adds margin_coin column (USDT for USDT-FUTURES).
-+   4. Adds trade_side column (open / close / NULL; hedge mode only).
-+   5. Adds reduce_only boolean column (one-way mode only).
-+   6. Corrects time_in_force values to Bitget's force parameter
-+        (gtc / ioc / fok / post_only).
-+   7. Makes exchange status nullable (order may be persisted before exchange
-+        confirmation).
+--      (one_way -> one_way_mode, hedged -> hedge_mode), representing the
+--      account-level position mode, NOT Bitget's marginMode parameter.
+--   2. Adds margin_mode column (isolated / crossed) for Bitget's marginMode.
+--   3. Adds margin_coin column (USDT for USDT-FUTURES).
+--   4. Adds trade_side column (open / close / NULL; hedge mode only).
+--   5. Adds reduce_only boolean column (one-way mode only).
+--   6. Corrects time_in_force values to Bitget's force parameter
+--        (gtc / ioc / fok / post_only).
+--   7. Makes exchange status nullable (order may be persisted before exchange
+--        confirmation).
 +
 -- Step 1: Drop the old margin_mode constraint
 ALTER TABLE orders
