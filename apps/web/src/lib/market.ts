@@ -2,6 +2,32 @@ import { useSyncExternalStore } from "react";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
 
+export type TickerFreshnessStatus = "no_data" | "fresh" | "delayed" | "stale" | "unavailable";
+
+// Monotonic-time thresholds (milliseconds) for ticker freshness evaluation.
+// Conservative vs. the documented Classic V2 futures ticker push cadence (~300–400ms).
+const TICKER_FRESH_THRESHOLD_MS = 7000;
+const TICKER_STALE_THRESHOLD_MS = 10000;
+
+/**
+ * Evaluate ticker freshness from a monotonic timestamp.
+ *
+ * Rules:
+ *   - No timestamp → no_data
+ *   - Age below 7s → fresh
+ *   - Age from 7s up to but excluding 10s → delayed
+ *   - Age of 10s or more → stale
+ *
+ * Pure function: safe to test without React.
+ */
+export function evaluateTickerFreshness(lastWsAtMono: number | null, nowMono: number): TickerFreshnessStatus {
+  if (lastWsAtMono == null) return "no_data";
+  const age = nowMono - lastWsAtMono;
+  if (age < TICKER_FRESH_THRESHOLD_MS) return "fresh";
+  if (age < TICKER_STALE_THRESHOLD_MS) return "delayed";
+  return "stale";
+}
+
 export interface Ticker {
   symbol: string;
   last: string;
@@ -79,6 +105,7 @@ interface State {
   candleStale: boolean;
   candleLoading: boolean;
   candleError: string | null;
+  tickerFreshness: Record<string, TickerFreshnessStatus>;
 }
 
 export let state: State = {
@@ -101,6 +128,7 @@ export let state: State = {
   candleStale: false,
   candleLoading: false,
   candleError: null,
+  tickerFreshness: {},
 };
 
 const listeners = new Set<() => void>();
@@ -294,6 +322,11 @@ export function useTicker(symbol: string) {
   return s.tickers[symbol];
 }
 
+export function useTickerFreshness(symbol: string) {
+  const s = useMarketStore();
+  return s.tickerFreshness[symbol] ?? "no_data";
+}
+
 export function useOrderBook(symbol: string) {
   const s = useMarketStore();
   return s.orderBooks[symbol];
@@ -467,5 +500,21 @@ setInterval(() => {
   }
   if (state.candleLastUpdate && Date.now() - state.candleLastUpdate > 10000) {
     if (!state.candleStale) setState({ candleStale: true });
+  }
+
+  // Ticker freshness evaluation using monotonic time.
+  const nowMono = performance.now();
+  const newFreshness: Record<string, TickerFreshnessStatus> = { ...state.tickerFreshness };
+  let freshnessChanged = false;
+  for (const symbol of Object.keys(state.tickers)) {
+    const lastWs = state.tickerLastWsAtMono[symbol];
+    const status = evaluateTickerFreshness(lastWs, nowMono);
+    if (state.tickerFreshness[symbol] !== status) {
+      newFreshness[symbol] = status;
+      freshnessChanged = true;
+    }
+  }
+  if (freshnessChanged) {
+    setState({ tickerFreshness: newFreshness });
   }
 }, 2000);

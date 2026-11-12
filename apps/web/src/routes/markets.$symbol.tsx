@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useRef, useState, useEffect, useCallback } from "react";
-import { useTicker, useMarketStore, useOrderBook, useTrades, useCandles, subscribeMarket, fetchPreferences, savePreferences, type ChartGranularity } from "@/lib/market";
+import { useTicker, useTickerFreshness, useMarketStore, useOrderBook, useTrades, useCandles, subscribeMarket, fetchPreferences, savePreferences, type ChartGranularity, type TickerFreshnessStatus } from "@/lib/market";
 import { OrderBook } from "@/components/order-book";
 import { RecentTrades } from "@/components/recent-trades";
 import { CandlestickChart, CandlestickControls, type CandlestickChartHandle } from "@/components/candlestick-chart";
@@ -15,6 +15,7 @@ function MarketPage() {
   const { loading: authLoading, authenticated } = useAuth();
   const navigate = useNavigate();
   const ticker = useTicker(symbol);
+  const tickerFreshness: TickerFreshnessStatus = useTickerFreshness(symbol);
   const orderBook = useOrderBook(symbol);
   const trades = useTrades(symbol);
   const store = useMarketStore();
@@ -95,6 +96,22 @@ function MarketPage() {
   const statusColor =
     store.status === "connected" ? "text-green-500" : store.status === "reconnecting" ? "text-yellow-500" : "text-red-500";
 
+  const freshnessColor: Record<TickerFreshnessStatus, string> = {
+    fresh: "text-green-500",
+    delayed: "text-amber-500",
+    stale: "text-red-500",
+    no_data: "text-muted-foreground",
+    unavailable: "text-muted-foreground",
+  };
+
+  const freshnessLabel: Record<TickerFreshnessStatus, string> = {
+    fresh: "Live",
+    delayed: "Delayed",
+    stale: "Stale",
+    no_data: "Waiting for live data",
+    unavailable: "Unavailable",
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -102,8 +119,13 @@ function MarketPage() {
           <h1 className="text-2xl font-bold">{symbol}</h1>
           <p className="text-sm text-muted-foreground">USDT-FUTURES</p>
         </div>
-        <div className={`text-sm font-medium ${statusColor}`}>
-          {store.status}{store.stale ? " (stale)" : ""}
+        <div className="flex items-center gap-2">
+          <div className={`text-sm font-medium ${statusColor}`}>
+            {store.status}
+          </div>
+          <div className={`text-sm font-medium ${freshnessColor[tickerFreshness]}`}>
+            {freshnessLabel[tickerFreshness]}
+          </div>
         </div>
       </div>
 

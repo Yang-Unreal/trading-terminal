@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { state, subscribeMarket, fetchCandles } from "@/lib/market";
+import { state, subscribeMarket, fetchCandles, evaluateTickerFreshness, useTickerFreshness, type TickerFreshnessStatus } from "@/lib/market";
 
 const OPEN = 1;
 const CLOSED = 3;
@@ -458,5 +458,135 @@ describe("market WebSocket monotonic timestamps", () => {
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(3333);
     vi.restoreAllMocks();
+  });
+
+  // ---- Ticker freshness ----
+
+  it("evaluateTickerFreshness: no timestamp → no_data", () => {
+    expect(evaluateTickerFreshness(null, 1000)).toBe("no_data");
+  });
+
+  it("evaluateTickerFreshness: age 0 → fresh", () => {
+    expect(evaluateTickerFreshness(1000, 1000)).toBe("fresh");
+  });
+
+  it("evaluateTickerFreshness: age just below 7s → fresh", () => {
+    expect(evaluateTickerFreshness(1000, 7999)).toBe("fresh");
+  });
+
+  it("evaluateTickerFreshness: age exactly 7s → delayed", () => {
+    expect(evaluateTickerFreshness(1000, 8000)).toBe("delayed");
+  });
+
+  it("evaluateTickerFreshness: age just below 10s → delayed", () => {
+    expect(evaluateTickerFreshness(1000, 10999)).toBe("delayed");
+  });
+
+  it("evaluateTickerFreshness: age exactly 10s → stale", () => {
+    expect(evaluateTickerFreshness(1000, 11000)).toBe("stale");
+  });
+
+  it("evaluateTickerFreshness: age above 10s → stale", () => {
+    expect(evaluateTickerFreshness(1000, 11001)).toBe("stale");
+  });
+
+  it("evaluateTickerFreshness: negative age → fresh (edge case)", () => {
+    expect(evaluateTickerFreshness(1000, 999)).toBe("fresh");
+  });
+
+  it("evaluateTickerFreshness: new live timestamp returns fresh", () => {
+    expect(evaluateTickerFreshness(1000, 1000)).toBe("fresh");
+    expect(evaluateTickerFreshness(5000, 5001)).toBe("fresh");
+  });
+
+  // ---- Ticker freshness store integration ----
+
+  it("cached ticker snapshot does not establish live freshness (no_data)", () => {
+    subscribeMarket("BTCUSDT");
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "snapshot",
+        data: { symbol: "BTCUSDT", last: "50", isSnapshot: true },
+      }),
+    });
+    expect(state.tickerLastWsAtMono["BTCUSDT"]).toBeUndefined();
+    const status = evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], performance.now());
+    expect(status).toBe("no_data");
+  });
+
+  it("valid live ticker establishes fresh status", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(5000);
+    latestWS().onmessage({
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "100", isSnapshot: false } }),
+    });
+    vi.restoreAllMocks();
+    expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
+    const status = evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 5000);
+    expect(status).toBe("fresh");
+  });
+
+  it("live ticker freshness is per-symbol", () => {
+    subscribeMarket("BTCUSDT");
+    subscribeMarket("ETHUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    latestWS().onmessage({
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+    });
+    vi.restoreAllMocks();
+    // BTCUSDT is fresh at t=1000, ETHUSDT has no live trade
+    expect(evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 1000)).toBe("fresh");
+    expect(state.tickerLastWsAtMono["ETHUSDT"]).toBeUndefined();
+    expect(evaluateTickerFreshness(state.tickerLastWsAtMono["ETHUSDT"], 1000)).toBe("no_data");
+  });
+
+  it("reconnect does not refresh ticker freshness timestamp", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(5000);
+    latestWS().onmessage({
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+    });
+    expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
+
+    // Reconnect: close old socket
+    latestWS().readyState = CLOSED;
+    subscribeMarket("BTCUSDT");
+
+    // No new live message → timestamp unchanged
+    expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
+    vi.restoreAllMocks();
+  });
+
+  it("WebSocket disconnect does not directly change ticker freshness timestamp", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(5000);
+    latestWS().onmessage({
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+    });
+    expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
+
+    // Disconnect
+    latestWS().readyState = CLOSED;
+    latestWS().onclose?.();
+
+    // Timestamp unchanged
+    expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
+    vi.restoreAllMocks();
+  });
+
+  it("age advances past fresh→delayed→stale thresholds", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(10000);
+    latestWS().onmessage({
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+    });
+    vi.restoreAllMocks();
+
+    // Fresh at t=10000 (age=0)
+    expect(evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 10000)).toBe("fresh");
+    // Delayed at t=17000 (age=7000)
+    expect(evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 17000)).toBe("delayed");
+    // Stale at t=20000 (age=10000)
+    expect(evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 20000)).toBe("stale");
   });
 });
