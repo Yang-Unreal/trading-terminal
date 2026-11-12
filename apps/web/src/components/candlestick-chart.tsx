@@ -416,6 +416,7 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
   // (close vs open). Survives granularity changes (same symbol) so direction is
   // not unnecessarily reset; reset on symbol changes.
   const currentCandleOpenRef = useRef<number | null>(null);
+  const isHydratedRef = useRef(false);
   const loadingOlderRef = useRef(false);
   const hasMoreHistoryRef = useRef(true);
   const oldestTimestampRef = useRef<number | null>(null);
@@ -622,6 +623,7 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
     loadingOlderRef.current = false;
     hasMoreHistoryRef.current = true;
     oldestTimestampRef.current = null;
+    isHydratedRef.current = false;
     applySeriesData([], []);
 
     try {
@@ -726,6 +728,13 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
           visibleBars,
         });
         loadOlderHistory();
+      }
+
+      // Mark this request as hydrated only after history + live state have been
+      // merged and applied atomically. Effects must not render a provisional
+      // single candle before this point.
+      if (requestIdRef.current === requestId) {
+        isHydratedRef.current = true;
       }
 
       setLoading(false);
@@ -1216,13 +1225,16 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
       };
     }
 
-    if (loading) {
+    if (loading || !isHydratedRef.current) {
+      // Defer chart rendering until historical data has been hydrated for this
+      // request generation. Live updates are buffered and flushed once
+      // loadHistory completes the atomic merge.
       liveBufferRef.current.set(candle.startTime, candle);
       return;
     }
 
     renderCandle(candle);
-  }, [candles, loading, renderCandle, symbol, granularity]);
+  }, [candles, loading, renderCandle, symbol, granularity, isHydratedRef]);
 
   // 5. Drive the active candle and chart price indicator from accepted live trades.
   // Only genuine live Trade messages (`isSnapshot: false`) are accepted; cached
@@ -1263,15 +1275,14 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
     // raw incoming trade price here would let an out-of-order (rejected from
     // changing Close) trade regress the current-price indicator.
     tradePriceSetRef.current = true;
-    if (loading) {
-      // Defer chart rendering until initial history has hydrated so we never
-      // flash a single trade candle before the full historical dataset is
-      // ready. The accumulated trade state is flushed in loadHistory once
-      // REST completes.
+    if (loading || !isHydratedRef.current) {
+      // Defer chart rendering until historical data has been hydrated for this
+      // request generation. The accumulated trade state is flushed in
+      // loadHistory once REST completes.
       return;
     }
     applyTradeCandleToChart(updated, updated.close);
-  }, [trades, symbol, granularity]);
+  }, [trades, symbol, granularity, isHydratedRef]);
 
   // 6. Clear provisional live state when the symbol or granularity changes so
   //    trades for another symbol / bucket can never affect the current chart.
