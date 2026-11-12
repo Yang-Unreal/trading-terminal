@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useRef, useState, useEffect, useCallback } from "react";
-import { useTicker, useTickerFreshness, useMarketStore, useOrderBook, useTrades, useCandles, subscribeMarket, fetchPreferences, savePreferences, type ChartGranularity, type TickerFreshnessStatus } from "@/lib/market";
+import { useTicker, useTickerFreshness, useOrderBookActivity, useMarketStore, useOrderBook, useTrades, useCandles, subscribeMarket, fetchPreferences, savePreferences, type ChartGranularity, type TickerFreshnessStatus, type OrderBookActivityStatus } from "@/lib/market";
 import { OrderBook } from "@/components/order-book";
 import { RecentTrades } from "@/components/recent-trades";
 import { CandlestickChart, CandlestickControls, type CandlestickChartHandle } from "@/components/candlestick-chart";
@@ -16,6 +16,7 @@ function MarketPage() {
   const navigate = useNavigate();
   const ticker = useTicker(symbol);
   const tickerFreshness: TickerFreshnessStatus = useTickerFreshness(symbol);
+  const orderBookActivity: OrderBookActivityStatus = useOrderBookActivity(symbol);
   const orderBook = useOrderBook(symbol);
   const trades = useTrades(symbol);
   const store = useMarketStore();
@@ -142,7 +143,7 @@ function MarketPage() {
           <CandlestickChart ref={chartRef} symbol={symbol} granularity={granularity} />
         </div>
         <div className="w-full lg:w-80 flex flex-col gap-4">
-          <OrderBook orderBook={orderBook} stale={store.orderBookStale} />
+          <OrderBook orderBook={orderBook} stale={store.orderBookStale} activityStatus={orderBookActivity} />
           <RecentTrades trades={trades} stale={store.tradesStale} />
         </div>
       </div>

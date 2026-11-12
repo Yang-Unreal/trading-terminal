@@ -28,6 +28,30 @@ export function evaluateTickerFreshness(lastWsAtMono: number | null, nowMono: nu
   return "stale";
 }
 
+export type OrderBookActivityStatus = "no_data" | "recent_update" | "quiet";
+
+// Order Book updates are event-driven: Bitget sends a books15 snapshot only
+// when the order book changes. There is no periodic heartbeat when the book
+// is quiet, so absence of new messages does not imply a broken feed.
+const ORDER_BOOK_QUIET_THRESHOLD_MS = 10000;
+
+/**
+ * Evaluate order book activity from a monotonic timestamp.
+ *
+ * Rules:
+ *   - No timestamp → no_data
+ *   - Age below 10s → recent_update
+ *   - Age of 10s or more → quiet
+ *
+ * Pure function: safe to test without React.
+ */
+export function evaluateOrderBookActivity(lastWsAtMono: number | null, nowMono: number): OrderBookActivityStatus {
+  if (lastWsAtMono == null) return "no_data";
+  const age = nowMono - lastWsAtMono;
+  if (age < ORDER_BOOK_QUIET_THRESHOLD_MS) return "recent_update";
+  return "quiet";
+}
+
 export interface Ticker {
   symbol: string;
   last: string;
@@ -106,6 +130,7 @@ interface State {
   candleLoading: boolean;
   candleError: string | null;
   tickerFreshness: Record<string, TickerFreshnessStatus>;
+  orderBookActivity: Record<string, OrderBookActivityStatus>;
 }
 
 export let state: State = {
@@ -129,6 +154,7 @@ export let state: State = {
   candleLoading: false,
   candleError: null,
   tickerFreshness: {},
+  orderBookActivity: {},
 };
 
 const listeners = new Set<() => void>();
@@ -173,10 +199,11 @@ function connect() {
             tsReceived: d.tsReceived ?? null,
           };
           state.tickers[t.symbol] = t;
-          if (d.isSnapshot === false) {
-            state.tickerLastWsAtMono[t.symbol] = performance.now();
-          }
-          setState({ tickers: { ...state.tickers }, lastUpdate: Date.now(), stale: false });
+        if (msg.isSnapshot === false) {
+          state.tickerLastWsAtMono[t.symbol] = performance.now();
+          state.tickerFreshness[t.symbol] = "fresh";
+        }
+        setState({ tickers: { ...state.tickers }, lastUpdate: Date.now(), stale: false, tickerFreshness: state.tickerFreshness });
         }
       }
       if (msg.type === "orderbook") {
@@ -191,10 +218,11 @@ function connect() {
           source: d.source ?? null,
         };
         state.orderBooks[book.symbol] = book;
-        if (d.isSnapshot === false) {
+        if (msg.isSnapshot === false) {
           state.orderBookLastWsAtMono[book.symbol] = performance.now();
+          state.orderBookActivity[book.symbol] = "recent_update";
         }
-        setState({ orderBooks: { ...state.orderBooks }, orderBookLastUpdate: Date.now(), orderBookStale: false });
+        setState({ orderBooks: { ...state.orderBooks }, orderBookLastUpdate: Date.now(), orderBookStale: false, orderBookActivity: state.orderBookActivity });
       }
       if (msg.type === "trade") {
         const d = msg.data;
@@ -207,14 +235,14 @@ function connect() {
           tsExchange: d.tsExchange ?? null,
           tsReceived: d.tsReceived ?? null,
           source: d.source ?? null,
-          isSnapshot: d.isSnapshot === true,
-        };
-        const existing = state.trades[trade.symbol] ?? [];
-        const updated = [trade, ...existing].slice(0, 100);
-        state.trades[trade.symbol] = updated;
-        if (d.isSnapshot === false) {
-          state.tradeLastWsAtMono[trade.symbol] = performance.now();
-        }
+        isSnapshot: msg.isSnapshot === true,
+      };
+      const existing = state.trades[trade.symbol] ?? [];
+      const updated = [trade, ...existing].slice(0, 100);
+      state.trades[trade.symbol] = updated;
+      if (msg.isSnapshot === false) {
+        state.tradeLastWsAtMono[trade.symbol] = performance.now();
+      }
         setState({ trades: { ...state.trades }, tradesLastUpdate: Date.now(), tradesStale: false });
       }
       if (msg.type === "trades") {
@@ -229,15 +257,15 @@ function connect() {
           tsExchange: t.tsExchange ?? null,
           tsReceived: t.tsReceived ?? null,
           source: t.source ?? null,
-          isSnapshot: d.isSnapshot === true,
-        }));
-        const existing = state.trades[symbol] ?? [];
-        const seen = new Set(existing.map((t) => t.tradeId));
-        const merged = [...incoming.filter((t) => !seen.has(t.tradeId)), ...existing].slice(0, 100);
-        state.trades[symbol] = merged;
-        if (d.isSnapshot === false) {
-          state.tradeLastWsAtMono[symbol] = performance.now();
-        }
+        isSnapshot: msg.isSnapshot === true,
+      }));
+      const existing = state.trades[symbol] ?? [];
+      const seen = new Set(existing.map((t) => t.tradeId));
+      const merged = [...incoming.filter((t) => !seen.has(t.tradeId)), ...existing].slice(0, 100);
+      state.trades[symbol] = merged;
+      if (msg.isSnapshot === false) {
+        state.tradeLastWsAtMono[symbol] = performance.now();
+      }
         setState({ trades: { ...state.trades }, tradesLastUpdate: Date.now(), tradesStale: false });
       }
       if (msg.type === "candle") {
@@ -325,6 +353,11 @@ export function useTicker(symbol: string) {
 export function useTickerFreshness(symbol: string) {
   const s = useMarketStore();
   return s.tickerFreshness[symbol] ?? "no_data";
+}
+
+export function useOrderBookActivity(symbol: string) {
+  const s = useMarketStore();
+  return s.orderBookActivity[symbol] ?? "no_data";
 }
 
 export function useOrderBook(symbol: string) {
@@ -516,5 +549,20 @@ setInterval(() => {
   }
   if (freshnessChanged) {
     setState({ tickerFreshness: newFreshness });
+  }
+
+  // Order book activity evaluation using monotonic time.
+  const newActivity: Record<string, OrderBookActivityStatus> = { ...state.orderBookActivity };
+  let activityChanged = false;
+  for (const symbol of Object.keys(state.orderBooks)) {
+    const lastWs = state.orderBookLastWsAtMono[symbol];
+    const status = evaluateOrderBookActivity(lastWs, nowMono);
+    if (state.orderBookActivity[symbol] !== status) {
+      newActivity[symbol] = status;
+      activityChanged = true;
+    }
+  }
+  if (activityChanged) {
+    setState({ orderBookActivity: newActivity });
   }
 }, 2000);

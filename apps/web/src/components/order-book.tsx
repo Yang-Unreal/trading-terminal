@@ -1,14 +1,38 @@
 import { useMemo } from "react";
 import { addDecimal, divideDecimal, formatDecimal, multiplyDecimal, subtractDecimal } from "@/lib/decimal";
+import { type OrderBookActivityStatus } from "@/lib/market";
+
+function activityColor(status?: OrderBookActivityStatus): string {
+  switch (status) {
+    case "recent_update":
+      return "text-green-500";
+    case "quiet":
+      return "text-amber-500";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
+function activityLabel(status?: OrderBookActivityStatus): string {
+  switch (status) {
+    case "recent_update":
+      return "Recent Update";
+    case "quiet":
+      return "Quiet";
+    default:
+      return "Waiting for live depth";
+  }
+}
 
 interface Level { price: string; quantity: string; }
 
 interface OrderBookProps {
   orderBook?: { bids: Level[]; asks: Level[] } | null;
   stale?: boolean;
+  activityStatus?: OrderBookActivityStatus;
 }
 
-export function OrderBook({ orderBook, stale }: OrderBookProps) {
+export function OrderBook({ orderBook, stale, activityStatus }: OrderBookProps) {
   const asksHighToLow = useMemo(() => [...(orderBook?.asks ?? [])].sort((a, b) => Number(b.price) - Number(a.price)), [orderBook]);
   const bidsHighToLow = useMemo(() => [...(orderBook?.bids ?? [])].sort((a, b) => Number(b.price) - Number(a.price)), [orderBook]);
 
@@ -46,7 +70,9 @@ export function OrderBook({ orderBook, stale }: OrderBookProps) {
     <div className="rounded-lg border p-3 space-y-2">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold">Order Book</h2>
-        {stale && <span className="text-xs text-yellow-500">Stale</span>}
+        <div className={`text-xs font-medium ${activityColor(activityStatus)}`}>
+          {activityLabel(activityStatus)}
+        </div>
       </div>
       <div className="grid grid-cols-3 text-xs text-muted-foreground font-mono">
         <span>Price</span>

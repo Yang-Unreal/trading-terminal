@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { state, subscribeMarket, fetchCandles, evaluateTickerFreshness, useTickerFreshness, type TickerFreshnessStatus } from "@/lib/market";
+import { state, subscribeMarket, fetchCandles, evaluateTickerFreshness, useTickerFreshness, evaluateOrderBookActivity, useOrderBookActivity, type TickerFreshnessStatus, type OrderBookActivityStatus } from "@/lib/market";
 
 const OPEN = 1;
 const CLOSED = 3;
@@ -52,6 +52,8 @@ function initialState() {
     candleStale: false,
     candleLoading: false,
     candleError: null,
+    tickerFreshness: {},
+    orderBookActivity: {},
   };
 }
 
@@ -66,7 +68,8 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "ticker",
-        data: { symbol: "BTCUSDT", last: "100", isSnapshot: false },
+        data: { symbol: "BTCUSDT", last: "100" },
+        isSnapshot: false,
       }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(12345);
@@ -84,8 +87,8 @@ describe("market WebSocket monotonic timestamps", () => {
           bids: [],
           asks: [],
           tsReceived: 1,
-          isSnapshot: false,
         },
+        isSnapshot: false,
       }),
     });
     expect(state.orderBookLastWsAtMono["ETHUSDT"]).toBe(2000);
@@ -105,8 +108,8 @@ describe("market WebSocket monotonic timestamps", () => {
           size: "1",
           side: "buy",
           tsReceived: 1,
-          isSnapshot: false,
         },
+        isSnapshot: false,
       }),
     });
     expect(state.tradeLastWsAtMono["BTCUSDT"]).toBe(3000);
@@ -132,8 +135,8 @@ describe("market WebSocket monotonic timestamps", () => {
             quoteVolume: "1",
           },
           tsReceived: 1,
-          isSnapshot: false,
         },
+        isSnapshot: false,
       }),
     });
     expect(state.candleLastWsAtMono["BTCUSDT"]["1m"]).toBe(4000);
@@ -146,7 +149,8 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "ticker",
-        data: { symbol: "BTCUSDT", last: "1", isSnapshot: false },
+        data: { symbol: "BTCUSDT", last: "1" },
+        isSnapshot: false,
       }),
     });
     vi.restoreAllMocks();
@@ -154,7 +158,8 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "orderbook",
-        data: { symbol: "BTCUSDT", bids: [], asks: [], isSnapshot: false },
+        data: { symbol: "BTCUSDT", bids: [], asks: [] },
+        isSnapshot: false,
       }),
     });
     vi.restoreAllMocks();
@@ -167,12 +172,12 @@ describe("market WebSocket monotonic timestamps", () => {
     subscribeMarket("BTCUSDT");
     vi.spyOn(performance, "now").mockReturnValue(100);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     vi.restoreAllMocks();
     vi.spyOn(performance, "now").mockReturnValue(200);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "ETHUSDT", last: "2", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "ETHUSDT", last: "2" }, isSnapshot: false }),
     });
     vi.restoreAllMocks();
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(100);
@@ -198,8 +203,8 @@ describe("market WebSocket monotonic timestamps", () => {
             quoteVolume: "1",
           },
           tsReceived: 1,
-          isSnapshot: false,
         },
+        isSnapshot: false,
       }),
     });
     vi.restoreAllMocks();
@@ -220,8 +225,8 @@ describe("market WebSocket monotonic timestamps", () => {
             quoteVolume: "1",
           },
           tsReceived: 1,
-          isSnapshot: false,
         },
+        isSnapshot: false,
       }),
     });
     vi.restoreAllMocks();
@@ -254,7 +259,7 @@ describe("market WebSocket monotonic timestamps", () => {
     vi.spyOn(performance, "now").mockReturnValue(5000);
     subscribeMarket("BTCUSDT");
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     vi.restoreAllMocks();
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
@@ -282,7 +287,7 @@ describe("market WebSocket monotonic timestamps", () => {
     vi.spyOn(performance, "now").mockReturnValue(777);
     subscribeMarket("BTCUSDT");
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(777); // performance.now, not Date.now
     expect(state.tickerLastWsAtMono["BTCUSDT"]).not.toBe(9999999999999);
@@ -297,13 +302,15 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "snapshot",
-        data: { symbol: "BTCUSDT", last: "50", isSnapshot: true },
+        data: { symbol: "BTCUSDT", last: "50" },
+        isSnapshot: true,
       }),
     });
     // Displayed data updated from cache
     expect(state.tickers["BTCUSDT"]?.last).toBe("50");
     // Monotonic timestamp NOT refreshed by cached snapshot
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBeUndefined();
+    expect(state.tickerFreshness["BTCUSDT"]).toBeUndefined();
     vi.restoreAllMocks();
   });
 
@@ -318,12 +325,13 @@ describe("market WebSocket monotonic timestamps", () => {
           bids: [["1", "2"]],
           asks: [["3", "4"]],
           tsReceived: 1,
-          isSnapshot: true,
         },
+        isSnapshot: true,
       }),
     });
     expect(state.orderBooks["ETHUSDT"]?.bids).toEqual([["1", "2"]]);
     expect(state.orderBookLastWsAtMono["ETHUSDT"]).toBeUndefined();
+    expect(state.orderBookActivity["ETHUSDT"]).toBeUndefined();
     vi.restoreAllMocks();
   });
 
@@ -381,10 +389,11 @@ describe("market WebSocket monotonic timestamps", () => {
           size: "1",
           side: "buy",
           tsReceived: 1,
-          isSnapshot: false,
         },
+        isSnapshot: false,
       }),
     });
+    vi.restoreAllMocks();
     expect(state.tradeLastWsAtMono["BTCUSDT"]).toBe(5555);
     vi.restoreAllMocks();
   });
@@ -394,7 +403,7 @@ describe("market WebSocket monotonic timestamps", () => {
     subscribeMarket("BTCUSDT");
     // Live message establishes freshness
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
 
@@ -405,7 +414,8 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "snapshot",
-        data: { symbol: "BTCUSDT", last: "99", isSnapshot: true },
+        data: { symbol: "BTCUSDT", last: "99" },
+        isSnapshot: true,
       }),
     });
     // Cached snapshot does not refresh timestamp
@@ -419,7 +429,8 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "snapshot",
-        data: { symbol: "NEWUSDT", last: "77", isSnapshot: true },
+        data: { symbol: "NEWUSDT", last: "77" },
+        isSnapshot: true,
       }),
     });
     expect(state.tickerLastWsAtMono["NEWUSDT"]).toBeUndefined();
@@ -428,7 +439,7 @@ describe("market WebSocket monotonic timestamps", () => {
     // First subsequent valid live message establishes freshness
     vi.spyOn(performance, "now").mockReturnValue(2222);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "NEWUSDT", last: "78", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "NEWUSDT", last: "78" }, isSnapshot: false }),
     });
     expect(state.tickerLastWsAtMono["NEWUSDT"]).toBe(2222);
     vi.restoreAllMocks();
@@ -443,7 +454,8 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "snapshot",
-        data: { symbol: "BTCUSDT", last: "1", isSnapshot: true },
+        data: { symbol: "BTCUSDT", last: "1" },
+        isSnapshot: true,
       }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBeUndefined();
@@ -454,7 +466,7 @@ describe("market WebSocket monotonic timestamps", () => {
     subscribeMarket("BTCUSDT");
     vi.spyOn(performance, "now").mockReturnValue(3333);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(3333);
     vi.restoreAllMocks();
@@ -462,35 +474,35 @@ describe("market WebSocket monotonic timestamps", () => {
 
   // ---- Ticker freshness ----
 
-  it("evaluateTickerFreshness: no timestamp → no_data", () => {
+  it("evaluateTickerFreshness: no timestamp -> no_data", () => {
     expect(evaluateTickerFreshness(null, 1000)).toBe("no_data");
   });
 
-  it("evaluateTickerFreshness: age 0 → fresh", () => {
+  it("evaluateTickerFreshness: age 0 -> fresh", () => {
     expect(evaluateTickerFreshness(1000, 1000)).toBe("fresh");
   });
 
-  it("evaluateTickerFreshness: age just below 7s → fresh", () => {
+  it("evaluateTickerFreshness: age just below 7s -> fresh", () => {
     expect(evaluateTickerFreshness(1000, 7999)).toBe("fresh");
   });
 
-  it("evaluateTickerFreshness: age exactly 7s → delayed", () => {
+  it("evaluateTickerFreshness: age exactly 7s -> delayed", () => {
     expect(evaluateTickerFreshness(1000, 8000)).toBe("delayed");
   });
 
-  it("evaluateTickerFreshness: age just below 10s → delayed", () => {
+  it("evaluateTickerFreshness: age just below 10s -> delayed", () => {
     expect(evaluateTickerFreshness(1000, 10999)).toBe("delayed");
   });
 
-  it("evaluateTickerFreshness: age exactly 10s → stale", () => {
+  it("evaluateTickerFreshness: age exactly 10s -> stale", () => {
     expect(evaluateTickerFreshness(1000, 11000)).toBe("stale");
   });
 
-  it("evaluateTickerFreshness: age above 10s → stale", () => {
+  it("evaluateTickerFreshness: age above 10s -> stale", () => {
     expect(evaluateTickerFreshness(1000, 11001)).toBe("stale");
   });
 
-  it("evaluateTickerFreshness: negative age → fresh (edge case)", () => {
+  it("evaluateTickerFreshness: negative age -> fresh (edge case)", () => {
     expect(evaluateTickerFreshness(1000, 999)).toBe("fresh");
   });
 
@@ -506,7 +518,8 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().onmessage({
       data: JSON.stringify({
         type: "snapshot",
-        data: { symbol: "BTCUSDT", last: "50", isSnapshot: true },
+        data: { symbol: "BTCUSDT", last: "50" },
+        isSnapshot: true,
       }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBeUndefined();
@@ -514,14 +527,15 @@ describe("market WebSocket monotonic timestamps", () => {
     expect(status).toBe("no_data");
   });
 
-  it("valid live ticker establishes fresh status", () => {
+  it("valid live ticker establishes fresh status immediately", () => {
     subscribeMarket("BTCUSDT");
     vi.spyOn(performance, "now").mockReturnValue(5000);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "100", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "100" }, isSnapshot: false }),
     });
     vi.restoreAllMocks();
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
+    expect(state.tickerFreshness["BTCUSDT"]).toBe("fresh");
     const status = evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 5000);
     expect(status).toBe("fresh");
   });
@@ -531,7 +545,7 @@ describe("market WebSocket monotonic timestamps", () => {
     subscribeMarket("ETHUSDT");
     vi.spyOn(performance, "now").mockReturnValue(1000);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     vi.restoreAllMocks();
     // BTCUSDT is fresh at t=1000, ETHUSDT has no live trade
@@ -544,7 +558,7 @@ describe("market WebSocket monotonic timestamps", () => {
     subscribeMarket("BTCUSDT");
     vi.spyOn(performance, "now").mockReturnValue(5000);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
 
@@ -552,7 +566,7 @@ describe("market WebSocket monotonic timestamps", () => {
     latestWS().readyState = CLOSED;
     subscribeMarket("BTCUSDT");
 
-    // No new live message → timestamp unchanged
+    // No new live message -> timestamp unchanged
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
     vi.restoreAllMocks();
   });
@@ -561,7 +575,7 @@ describe("market WebSocket monotonic timestamps", () => {
     subscribeMarket("BTCUSDT");
     vi.spyOn(performance, "now").mockReturnValue(5000);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     expect(state.tickerLastWsAtMono["BTCUSDT"]).toBe(5000);
 
@@ -574,11 +588,11 @@ describe("market WebSocket monotonic timestamps", () => {
     vi.restoreAllMocks();
   });
 
-  it("age advances past fresh→delayed→stale thresholds", () => {
+  it("age advances past fresh->delayed->stale thresholds", () => {
     subscribeMarket("BTCUSDT");
     vi.spyOn(performance, "now").mockReturnValue(10000);
     latestWS().onmessage({
-      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1", isSnapshot: false } }),
+      data: JSON.stringify({ type: "ticker", data: { symbol: "BTCUSDT", last: "1" }, isSnapshot: false }),
     });
     vi.restoreAllMocks();
 
@@ -588,5 +602,171 @@ describe("market WebSocket monotonic timestamps", () => {
     expect(evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 17000)).toBe("delayed");
     // Stale at t=20000 (age=10000)
     expect(evaluateTickerFreshness(state.tickerLastWsAtMono["BTCUSDT"], 20000)).toBe("stale");
+  });
+
+  // ---- Order Book activity ----
+
+  it("evaluateOrderBookActivity: no timestamp -> no_data", () => {
+    expect(evaluateOrderBookActivity(null, 1000)).toBe("no_data");
+  });
+
+  it("evaluateOrderBookActivity: age 0 -> recent_update", () => {
+    expect(evaluateOrderBookActivity(1000, 1000)).toBe("recent_update");
+  });
+
+  it("evaluateOrderBookActivity: age just below 10s -> recent_update", () => {
+    expect(evaluateOrderBookActivity(1000, 10999)).toBe("recent_update");
+  });
+
+  it("evaluateOrderBookActivity: age exactly 10s -> quiet", () => {
+    expect(evaluateOrderBookActivity(1000, 11000)).toBe("quiet");
+  });
+
+  it("evaluateOrderBookActivity: age above 10s -> quiet", () => {
+    expect(evaluateOrderBookActivity(1000, 11001)).toBe("quiet");
+  });
+
+  it("evaluateOrderBookActivity: negative age -> recent_update (edge case)", () => {
+    expect(evaluateOrderBookActivity(1000, 999)).toBe("recent_update");
+  });
+
+  it("evaluateOrderBookActivity: new live timestamp returns recent_update", () => {
+    expect(evaluateOrderBookActivity(1000, 1000)).toBe("recent_update");
+    expect(evaluateOrderBookActivity(5000, 5001)).toBe("recent_update");
+  });
+
+  it("cached order-book snapshot updates displayed data but remains no_data", () => {
+    subscribeMarket("BTCUSDT");
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "orderbook",
+        data: {
+          symbol: "BTCUSDT",
+          bids: [["100", "2"]],
+          asks: [["101", "3"]],
+        },
+        isSnapshot: true,
+      }),
+    });
+    expect(state.orderBooks["BTCUSDT"]?.bids).toEqual([["100", "2"]]);
+    expect(state.orderBookLastWsAtMono["BTCUSDT"]).toBeUndefined();
+    expect(state.orderBookActivity["BTCUSDT"]).toBeUndefined();
+    expect(evaluateOrderBookActivity(state.orderBookLastWsAtMono["BTCUSDT"], performance.now())).toBe("no_data");
+  });
+
+  it("valid live order-book snapshot immediately sets recent_update", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(5000);
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "orderbook",
+        data: {
+          symbol: "BTCUSDT",
+          bids: [["100", "2"]],
+          asks: [["101", "3"]],
+        },
+        isSnapshot: false,
+      }),
+    });
+    vi.restoreAllMocks();
+    expect(state.orderBookLastWsAtMono["BTCUSDT"]).toBe(5000);
+    expect(state.orderBookActivity["BTCUSDT"]).toBe("recent_update");
+    expect(evaluateOrderBookActivity(state.orderBookLastWsAtMono["BTCUSDT"], 5000)).toBe("recent_update");
+  });
+
+  it("live order-book snapshot with empty sides still updates activity", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(5000);
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "orderbook",
+        data: {
+          symbol: "BTCUSDT",
+          bids: [],
+          asks: [],
+        },
+        isSnapshot: false,
+      }),
+    });
+    vi.restoreAllMocks();
+    // Structurally valid but empty: still a live update, so activity is refreshed
+    expect(state.orderBookLastWsAtMono["BTCUSDT"]).toBe(5000);
+    expect(state.orderBookActivity["BTCUSDT"]).toBe("recent_update");
+  });
+
+  it("order book activity is per-symbol", () => {
+    subscribeMarket("BTCUSDT");
+    subscribeMarket("ETHUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "orderbook",
+        data: { symbol: "BTCUSDT", bids: [["100", "2"]], asks: [["101", "3"]] },
+        isSnapshot: false,
+      }),
+    });
+    vi.restoreAllMocks();
+    expect(state.orderBookActivity["BTCUSDT"]).toBe("recent_update");
+    expect(evaluateOrderBookActivity(state.orderBookLastWsAtMono["ETHUSDT"], performance.now())).toBe("no_data");
+  });
+
+  it("reconnect does not refresh order book activity timestamp", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(5000);
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "orderbook",
+        data: { symbol: "BTCUSDT", bids: [["100", "2"]], asks: [["101", "3"]] },
+        isSnapshot: false,
+      }),
+    });
+    expect(state.orderBookLastWsAtMono["BTCUSDT"]).toBe(5000);
+
+    // Reconnect: close old socket
+    latestWS().readyState = CLOSED;
+    subscribeMarket("BTCUSDT");
+
+    // No new live message -> timestamp unchanged
+    expect(state.orderBookLastWsAtMono["BTCUSDT"]).toBe(5000);
+    vi.restoreAllMocks();
+  });
+
+  it("WebSocket disconnect does not directly change order book activity", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(5000);
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "orderbook",
+        data: { symbol: "BTCUSDT", bids: [["100", "2"]], asks: [["101", "3"]] },
+        isSnapshot: false,
+      }),
+    });
+    expect(state.orderBookLastWsAtMono["BTCUSDT"]).toBe(5000);
+
+    // Disconnect
+    latestWS().readyState = CLOSED;
+    latestWS().onclose?.();
+
+    // Timestamp unchanged
+    expect(state.orderBookLastWsAtMono["BTCUSDT"]).toBe(5000);
+    vi.restoreAllMocks();
+  });
+
+  it("age advances past recent_update->quiet threshold", () => {
+    subscribeMarket("BTCUSDT");
+    vi.spyOn(performance, "now").mockReturnValue(10000);
+    latestWS().onmessage({
+      data: JSON.stringify({
+        type: "orderbook",
+        data: { symbol: "BTCUSDT", bids: [["100", "2"]], asks: [["101", "3"]] },
+        isSnapshot: false,
+      }),
+    });
+    vi.restoreAllMocks();
+
+    // recent_update at t=10000 (age=0)
+    expect(evaluateOrderBookActivity(state.orderBookLastWsAtMono["BTCUSDT"], 10000)).toBe("recent_update");
+    // quiet at t=20000 (age=10000)
+    expect(evaluateOrderBookActivity(state.orderBookLastWsAtMono["BTCUSDT"], 20000)).toBe("quiet");
   });
 });
